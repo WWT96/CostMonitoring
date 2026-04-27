@@ -2,8 +2,6 @@
 import io
 import time
 from datetime import datetime
-import tkinter as tk
-from tkinter import filedialog
 
 from config import settings
 
@@ -142,19 +140,6 @@ def inject_css(is_overview: bool = False):
             """,
             unsafe_allow_html=True,
         )
-
-
-def select_folder():
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)
-        folder_path = filedialog.askdirectory(master=root)
-        root.destroy()
-        return folder_path
-    except Exception:
-        return None
-
 
 def reset_search_callback():
     st.session_state.search_code = ""
@@ -331,29 +316,24 @@ if page == "概览":
     st.markdown("<div style='height: 50px;'></div>", unsafe_allow_html=True)
     st.markdown("### 🛠️ 数据源设置")
     if st.session_state.data_source == "local":
-        col1, col2, col3 = st.columns([3, 1, 1])
+        col1, col2 = st.columns([4, 1])
 
         with col1:
             current_path = st.text_input(
                 "本地数据文件夹路径",
                 value=st.session_state.folder_path,
-                placeholder="请点击右侧按钮选择文件夹...",
+                placeholder="请手动粘贴本地数据文件夹路径...",
                 label_visibility="collapsed",
             )
             if current_path != st.session_state.folder_path:
                 st.session_state.folder_path = current_path
+            st.caption("提示：云端版本请手动输入路径或使用同步功能，浏览器无法直接调起本地选择框。")
+            st.caption("优先建议使用“从云端数据库加载数据”或 API 同步功能，避免依赖本机文件系统。")
 
         with col2:
-            if st.button("📁 选择文件夹", use_container_width=True):
-                selected_path = select_folder()
-                if selected_path:
-                    st.session_state.folder_path = selected_path
-                    st.rerun()
-
-        with col3:
             if st.button("🔄 同步本地数据", type="primary", use_container_width=True):
                 if not st.session_state.folder_path:
-                    st.warning("请先选择文件夹路径")
+                    st.warning("请先输入文件夹路径，或切换到云端数据库 / API 同步模式")
                 else:
                     with st.spinner("正在扫描并合并数据，请稍候..."):
                         merged_df, price_col, error_msg = cached_load_data(st.session_state.folder_path)
