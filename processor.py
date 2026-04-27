@@ -808,6 +808,62 @@ def load_cost_anomaly_results(result_mode: str = "raw") -> pd.DataFrame:
     )
 
 
+def load_data_from_uploaded_files(
+    uploaded_files: List[Any],
+) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[str]]:
+    """处理来自 st.file_uploader 的上传文件列表，返回与 load_data_from_folder 相同格式的三元组。
+
+    Parameters
+    ----------
+    uploaded_files : list
+        Streamlit ``UploadedFile`` 对象的列表（支持 .xlsx / .xls / .csv）。
+
+    Returns
+    -------
+    (DataFrame, price_col, error_message)  出错时前两项为 None。
+    """
+    if not uploaded_files:
+        return None, None, "未提供任何上传文件"
+
+    df_list: List[pd.DataFrame] = []
+    price_col_detected: Optional[str] = None
+
+    for uploaded_file in uploaded_files:
+        try:
+            name: str = uploaded_file.name.lower()
+            raw_bytes = uploaded_file.getvalue()
+            if name.endswith(".csv"):
+                try:
+                    raw_df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8")
+                except UnicodeDecodeError:
+                    raw_df = pd.read_csv(io.BytesIO(raw_bytes), encoding="gbk")
+            else:
+                raw_df = pd.read_excel(io.BytesIO(raw_bytes))
+
+            # 将 FIELD_MAP 中定义的企业系统字段名映射为中文标准列名
+            rename_map = {
+                src: dst
+                for src, dst in FIELD_MAP.items()
+                if src in raw_df.columns and dst not in raw_df.columns
+            }
+            if rename_map:
+                raw_df = raw_df.rename(columns=rename_map)
+
+            processed_df, detected_price_col, _ = process_dataframe(raw_df)
+            if processed_df is not None:
+                df_list.append(processed_df)
+                if not price_col_detected:
+                    price_col_detected = detected_price_col
+        except Exception:
+            continue
+
+    if not df_list:
+        return None, None, "所有上传文件均未能成功解析，请检查文件格式和必要列名"
+
+    final_df = pd.concat(df_list, ignore_index=True)
+    return final_df, price_col_detected, None
+
+
 def load_data_from_folder(
     folder_path: str,
 ) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[str]]:
@@ -833,6 +889,14 @@ def load_data_from_folder(
                     raw_df = pd.read_csv(filename, encoding="gbk")
             else:
                 raw_df = pd.read_excel(filename)
+
+            rename_map = {
+                src: dst
+                for src, dst in FIELD_MAP.items()
+                if src in raw_df.columns and dst not in raw_df.columns
+            }
+            if rename_map:
+                raw_df = raw_df.rename(columns=rename_map)
 
             processed_df, detected_price_col, _ = process_dataframe(raw_df)
             if processed_df is not None:

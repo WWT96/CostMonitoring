@@ -214,12 +214,19 @@ def require_price_col(df):
     st.stop()
 
 
+def set_loaded_data(df, price_col: str, origin: str):
+    st.session_state.data = df
+    st.session_state.price_col = price_col or ""
+    st.session_state.loaded_data_origin = origin
+
+
 for key, default in {
     "data": None,
     "price_col": "",
     "data_source": "local",
     "anomaly_mode": "原始测算",
     "folder_path": "",
+    "loaded_data_origin": "",
     "report_page_number": 1,
     "search_code": "",
     "search_name": "",
@@ -329,6 +336,7 @@ if page == "概览":
                 st.session_state.folder_path = current_path
             st.caption("提示：云端版本请手动输入路径或使用同步功能，浏览器无法直接调起本地选择框。")
             st.caption("优先建议使用“从云端数据库加载数据”或 API 同步功能，避免依赖本机文件系统。")
+            st.info("提示：在云端版本中，请使用下方上传器导入本地文件。")
 
         with col2:
             if st.button("🔄 同步本地数据", type="primary", use_container_width=True):
@@ -340,11 +348,52 @@ if page == "概览":
                     if error_msg:
                         st.error(error_msg)
                     else:
-                        st.session_state.data = merged_df
-                        st.session_state.price_col = price_col or ""
+                        set_loaded_data(merged_df, price_col, origin="local_path")
                         st.success(f"✅ 已加载 {len(merged_df)} 条记录")
                         time.sleep(1)
                         st.rerun()
+
+        st.markdown("#### 📤 上传本地文件")
+        uploaded_files = st.file_uploader(
+            "上传 Excel / CSV 文件",
+            type=["xlsx", "xls", "csv"],
+            accept_multiple_files=True,
+            help="支持同时上传多个 Excel / CSV 文件，系统会自动合并并按现有清洗规则解析。",
+        )
+        if uploaded_files:
+            preview_names = "、".join(file.name for file in uploaded_files[:5])
+            suffix = "" if len(uploaded_files) <= 5 else " 等"
+            st.caption(f"已选择 {len(uploaded_files)} 个文件：{preview_names}{suffix}")
+
+        upload_col1, upload_col2 = st.columns([1, 1])
+        with upload_col1:
+            if st.button("📥 导入上传文件", use_container_width=True):
+                if not uploaded_files:
+                    st.warning("请先选择至少一个 Excel 或 CSV 文件")
+                else:
+                    with st.spinner("正在解析上传文件并合并数据，请稍候..."):
+                        merged_df, price_col, error_msg = processor.load_data_from_uploaded_files(uploaded_files)
+                    if error_msg:
+                        st.error(error_msg)
+                    else:
+                        set_loaded_data(merged_df, price_col, origin="local_upload")
+                        st.success(f"✅ 已导入并合并 {len(uploaded_files)} 个文件，共 {len(merged_df)} 条记录")
+                        time.sleep(1)
+                        st.rerun()
+
+        if st.session_state.data is not None and st.session_state.loaded_data_origin in {"local_path", "local_upload"}:
+            with upload_col2:
+                if st.button("☁️ 同步数据到云端数据库", use_container_width=True):
+                    try:
+                        with st.spinner("正在写入 Supabase 云端数据库..."):
+                            synced_rows = processor.persist_core_cost_records(
+                                st.session_state.data,
+                                price_col=require_price_col(st.session_state.data),
+                                mode="full",
+                            )
+                        st.success(f"✅ 已同步 {synced_rows} 条记录到云端数据库，下次可直接加载云端数据")
+                    except Exception as exc:
+                        st.error(f"同步到云端数据库失败: {exc}")
     else:
         col1, col2 = st.columns([5, 1])
         with col1:
@@ -361,8 +410,7 @@ if page == "概览":
                 if error_msg:
                     st.error(error_msg)
                 else:
-                    st.session_state.data = merged_df
-                    st.session_state.price_col = price_col or ""
+                    set_loaded_data(merged_df, price_col, origin="api")
                     st.success(f"✅ 已加载 {len(merged_df)} 条云端记录")
                     time.sleep(1)
                     st.rerun()
