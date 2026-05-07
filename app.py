@@ -875,7 +875,7 @@ elif page == "异常成本监控体系":
                 _sk_count = len(_skills_data.get("skills", []))
                 _sk_time = _skills_data.get("saved_at", "未知")
                 st.info(
-                    f"📘 已加载 Skills 技能书（{_sk_count} 个备件简称，保存于 {_sk_time}），"
+                    f"📘 正在应用来自数据库的最新 Skills 技能书（{_sk_count} 个备件简称，保存于 {_sk_time}），"
                     f"匹配的备件将使用个性化 σ/权重参数。"
                 )
             elif _skills_data is None and processor.has_skills_snapshot():
@@ -989,7 +989,10 @@ elif page == "异常成本监控体系":
                     elif rk in final_labels and final_labels[rk] == "正常":
                         del final_labels[rk]
 
-                processor.label_manager._flush(final_labels)
+                final_labels_df = pd.DataFrame(
+                    [{"record_key": key, "label": value} for key, value in final_labels.items()]
+                )
+                processor.label_manager._flush(final_labels_df)
                 st.cache_data.clear()
                 st.success(f"✅ 标注已保存！当前共 {len(final_labels)} 条专家校准记录。")
                 time.sleep(0.5)

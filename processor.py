@@ -16,6 +16,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    ForeignKey,
     Integer,
     MetaData,
     Numeric,
@@ -30,6 +31,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
 from config import settings
@@ -161,8 +163,8 @@ COST_ANOMALY_RESULTS_TABLE = Table(
     Column("computed_at", DateTime, server_default=text("CURRENT_TIMESTAMP")),
 )
 
-SKILLS_SNAPSHOT_TABLE = Table(
-    "skills_snapshot",
+SKILLS_SNAPSHOTS_TABLE = Table(
+    "skills_snapshots",
     DB_METADATA,
     Column("snapshot_id", String(36), primary_key=True),
     Column("version", String(16), nullable=False),
@@ -175,8 +177,7 @@ SKILLS_ITEMS_TABLE = Table(
     "skills_items",
     DB_METADATA,
     Column("item_id", Integer, primary_key=True, autoincrement=True),
-    Column("snapshot_id", Integer, nullable=False),
-    Column("snapshot_ref", String(36)),
+    Column("snapshot_id", String(36), ForeignKey("skills_snapshots.snapshot_id", ondelete="CASCADE"), nullable=False),
     Column("short_name", String(128), nullable=False),
     Column("algorithm_type", String(255)),
     Column("sigma_param", Float),
@@ -185,23 +186,6 @@ SKILLS_ITEMS_TABLE = Table(
     Column("lower_bound", Float),
     Column("upper_bound", Float),
     Column("base_price", Float),
-    Column("payload_json", Text, nullable=False),
-)
-
-SKILLS_PAYLOAD_ITEMS_TABLE = Table(
-    "skills_items_payload",
-    DB_METADATA,
-    Column("item_id", Integer, primary_key=True, autoincrement=True),
-    Column("snapshot_id", String(36), nullable=False),
-    Column("short_name", String(128), nullable=False),
-    Column("algorithm_type", String(255)),
-    Column("sigma_param", Float),
-    Column("expert_weight", Integer),
-    Column("alignment_rate", Text),
-    Column("lower_bound", Float),
-    Column("upper_bound", Float),
-    Column("base_price", Float),
-    Column("payload_json", Text, nullable=False),
 )
 
 _CORE_RECORD_EXPORT_COLUMNS = [
@@ -333,6 +317,9 @@ CREATE TABLE IF NOT EXISTS cost_anomaly_results (
 
 _DB_INIT_ERROR: Optional[Exception] = None
 _COST_ANOMALY_RESULTS_RESET_DONE = False
+_SKILLS_STORAGE_RESET_DONE = False
+_LEGACY_SKILLS_SNAPSHOT_TABLE_NAME = "skills_snapshot"
+_LEGACY_SKILLS_ITEMS_PAYLOAD_TABLE_NAME = "skills_items_payload"
 
 
 def _build_db_engine() -> Optional[Engine]:
@@ -393,6 +380,22 @@ def _chunk_rows(rows: Sequence[Dict[str, Any]], chunk_size: int = 500) -> Iterat
         yield rows[idx : idx + chunk_size]
 
 
+def _build_upsert_statement(
+    conn,
+    table: Table,
+    rows: Sequence[Dict[str, Any]],
+    conflict_columns: Sequence[str],
+    update_columns: Sequence[str],
+):
+    insert_factory = sqlite_insert if conn.dialect.name == "sqlite" else pg_insert
+    stmt = insert_factory(table).values(list(rows))
+    update_map = {column: stmt.excluded[column] for column in update_columns}
+    return stmt.on_conflict_do_update(
+        index_elements=[table.c[column] for column in conflict_columns],
+        set_=update_map,
+    )
+
+
 def _upsert_rows(
     table: Table,
     rows: Sequence[Dict[str, Any]],
@@ -405,12 +408,13 @@ def _upsert_rows(
     engine = require_db_engine()
     with engine.begin() as conn:
         for batch in _chunk_rows(rows):
-            stmt = pg_insert(table).values(list(batch))
-            update_map = {column: stmt.excluded[column] for column in update_columns}
             conn.execute(
-                stmt.on_conflict_do_update(
-                    index_elements=[table.c[column] for column in conflict_columns],
-                    set_=update_map,
+                _build_upsert_statement(
+                    conn,
+                    table,
+                    batch,
+                    conflict_columns=conflict_columns,
+                    update_columns=update_columns,
                 )
             )
 
@@ -1383,6 +1387,65 @@ class LabelManager:
             update_columns=["label", "labeled_at"],
         )
 
+    def _flush(self, final_labels_df: pd.DataFrame) -> None:
+        """以当前最终标注集为准，同步数据库中的 expert_feedback 记录。"""
+        if isinstance(final_labels_df, dict):
+            final_df = pd.DataFrame(
+                [{"record_key": key, "label": label} for key, label in final_labels_df.items()]
+            )
+        elif final_labels_df is None:
+            final_df = pd.DataFrame(columns=["record_key", "label"])
+        else:
+            final_df = final_labels_df.copy()
+
+        final_df = final_df.rename(
+            columns={
+                "_record_key": "record_key",
+                "记录主键": "record_key",
+                "当前标注": "label",
+                "status": "label",
+            }
+        )
+        if "record_key" not in final_df.columns:
+            final_df["record_key"] = pd.Series(dtype="string")
+        if "label" not in final_df.columns:
+            final_df["label"] = pd.Series(dtype="string")
+
+        final_df = final_df[["record_key", "label"]].copy()
+        final_df["record_key"] = final_df["record_key"].astype("string").str.strip()
+        final_df["label"] = final_df["label"].astype("string").str.strip()
+        final_df = final_df.replace({"record_key": {"": pd.NA}, "label": {"": pd.NA}})
+        final_df = final_df.dropna(subset=["record_key", "label"])
+        final_df = final_df.drop_duplicates(subset=["record_key"], keep="last")
+        final_df["labeled_at"] = datetime.now()
+
+        engine = require_db_engine()
+        with engine.begin() as conn:
+            existing_df = pd.read_sql(
+                select(EXPERT_FEEDBACK_TABLE.c.record_key, EXPERT_FEEDBACK_TABLE.c.label),
+                conn,
+            )
+            existing_keys = set(existing_df["record_key"].astype(str)) if not existing_df.empty else set()
+            final_keys = set(final_df["record_key"].astype(str))
+
+            keys_to_delete = sorted(existing_keys - final_keys)
+            if keys_to_delete:
+                conn.execute(
+                    delete(EXPERT_FEEDBACK_TABLE).where(EXPERT_FEEDBACK_TABLE.c.record_key.in_(keys_to_delete))
+                )
+
+            rows = _rows_from_dataframe(final_df[self._COLUMNS])
+            for batch in _chunk_rows(rows):
+                conn.execute(
+                    _build_upsert_statement(
+                        conn,
+                        EXPERT_FEEDBACK_TABLE,
+                        batch,
+                        conflict_columns=["record_key"],
+                        update_columns=["label", "labeled_at"],
+                    )
+                )
+
     def delete_labels(self, keys_to_remove) -> int:
         """删除指定 record_key 的标注，返回实际删除数量。"""
         keys = [str(key) for key in keys_to_remove if str(key)]
@@ -1714,11 +1777,12 @@ def detect_cost_anomalies(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
 
 
 def save_skills(skills: list, sigma: float = 1.0, weight: int = 80) -> str:
-    """将 Skills 列表持久化到 skills_snapshot / skills_items 表。"""
+    """将 Skills 列表持久化到 skills_snapshots / skills_items 表。"""
+    _ensure_skills_storage_tables()
     snapshot_id = str(uuid4())
     saved_at = datetime.now()
     _insert_rows(
-        SKILLS_SNAPSHOT_TABLE,
+        SKILLS_SNAPSHOTS_TABLE,
         [
             {
                 "snapshot_id": snapshot_id,
@@ -1746,23 +1810,23 @@ def save_skills(skills: list, sigma: float = 1.0, weight: int = 80) -> str:
                 "lower_bound": float(bounds.get("合理下限")) if bounds.get("合理下限") is not None else None,
                 "upper_bound": float(bounds.get("合理上限")) if bounds.get("合理上限") is not None else None,
                 "base_price": float(bounds.get("预测值")) if bounds.get("预测值") is not None else None,
-                "payload_json": _json.dumps(skill, ensure_ascii=False),
             }
         )
-    _insert_rows(SKILLS_PAYLOAD_ITEMS_TABLE, rows)
-    return "skills_snapshot / skills_items"
+    _insert_rows(SKILLS_ITEMS_TABLE, rows)
+    return "skills_snapshots / skills_items"
 
 
 def load_skills() -> Optional[Dict]:
     """加载最近一次 Skills 快照。"""
     if DB_ENGINE is None:
         return None
+    _ensure_skills_storage_tables()
     try:
         engine = require_db_engine()
         with engine.connect() as conn:
             snapshot = conn.execute(
-                select(SKILLS_SNAPSHOT_TABLE)
-                .order_by(SKILLS_SNAPSHOT_TABLE.c.saved_at.desc())
+                select(SKILLS_SNAPSHOTS_TABLE)
+                .order_by(SKILLS_SNAPSHOTS_TABLE.c.saved_at.desc())
                 .limit(1)
             ).mappings().first()
         if snapshot is None:
@@ -1770,27 +1834,21 @@ def load_skills() -> Optional[Dict]:
 
         items_query = (
             select(
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.payload_json,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.short_name,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.algorithm_type,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.sigma_param,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.expert_weight,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.alignment_rate,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.lower_bound,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.upper_bound,
-                SKILLS_PAYLOAD_ITEMS_TABLE.c.base_price,
+                SKILLS_ITEMS_TABLE.c.short_name,
+                SKILLS_ITEMS_TABLE.c.algorithm_type,
+                SKILLS_ITEMS_TABLE.c.sigma_param,
+                SKILLS_ITEMS_TABLE.c.expert_weight,
+                SKILLS_ITEMS_TABLE.c.alignment_rate,
+                SKILLS_ITEMS_TABLE.c.lower_bound,
+                SKILLS_ITEMS_TABLE.c.upper_bound,
+                SKILLS_ITEMS_TABLE.c.base_price,
             )
-            .where(SKILLS_PAYLOAD_ITEMS_TABLE.c.snapshot_id == snapshot["snapshot_id"])
-            .order_by(SKILLS_PAYLOAD_ITEMS_TABLE.c.short_name)
+            .where(SKILLS_ITEMS_TABLE.c.snapshot_id == snapshot["snapshot_id"])
+            .order_by(SKILLS_ITEMS_TABLE.c.short_name)
         )
         items_df = pd.read_sql(items_query, engine)
         skills_list = []
         for row in items_df.to_dict(orient="records"):
-            payload_json = row.get("payload_json")
-            if payload_json:
-                skills_list.append(_json.loads(payload_json))
-                continue
-
             skills_list.append(
                 {
                     "备件简称": row.get("short_name") or "",
@@ -1829,21 +1887,15 @@ def load_skills() -> Optional[Dict]:
 def has_skills_snapshot() -> bool:
     if DB_ENGINE is None:
         return False
+    _ensure_skills_storage_tables()
     try:
-        return _count_table_rows(SKILLS_SNAPSHOT_TABLE) > 0
+        return _count_table_rows(SKILLS_SNAPSHOTS_TABLE) > 0
     except Exception:
         return False
 
 
 def _ensure_database_columns() -> None:
-    engine = require_db_engine()
-    ddl_statements = [
-        "ALTER TABLE skills_items ADD COLUMN IF NOT EXISTS payload_json TEXT",
-        "ALTER TABLE skills_items ADD COLUMN IF NOT EXISTS snapshot_ref VARCHAR(36)",
-    ]
-    with engine.begin() as conn:
-        for statement in ddl_statements:
-            conn.execute(text(statement))
+    _ensure_skills_storage_tables()
 
 
 def _cost_anomaly_results_create_sql_for_engine(engine: Engine) -> str:
@@ -1907,11 +1959,12 @@ def _ensure_cost_anomaly_results_table() -> None:
 
 
 def _get_latest_skills_snapshot_id() -> Optional[str]:
+    _ensure_skills_storage_tables()
     engine = require_db_engine()
     with engine.connect() as conn:
         return conn.execute(
-            select(SKILLS_SNAPSHOT_TABLE.c.snapshot_id)
-            .order_by(SKILLS_SNAPSHOT_TABLE.c.saved_at.desc())
+            select(SKILLS_SNAPSHOTS_TABLE.c.snapshot_id)
+            .order_by(SKILLS_SNAPSHOTS_TABLE.c.saved_at.desc())
             .limit(1)
         ).scalar_one_or_none()
 
@@ -1925,10 +1978,186 @@ def _latest_skills_snapshot_has_items() -> bool:
     with engine.connect() as conn:
         item_count = conn.execute(
             select(func.count())
-            .select_from(SKILLS_PAYLOAD_ITEMS_TABLE)
-            .where(SKILLS_PAYLOAD_ITEMS_TABLE.c.snapshot_id == snapshot_id)
+            .select_from(SKILLS_ITEMS_TABLE)
+            .where(SKILLS_ITEMS_TABLE.c.snapshot_id == snapshot_id)
         ).scalar_one()
     return int(item_count) > 0
+
+
+def _get_table_columns(engine: Engine, table_name: str) -> List[str]:
+    inspector = inspect(engine)
+    if not inspector.has_table(table_name):
+        return []
+    return [column["name"] for column in inspector.get_columns(table_name)]
+
+
+def _drop_table_by_name(engine: Engine, table_name: str, *, cascade: bool = False) -> None:
+    suffix = " CASCADE" if cascade and engine.dialect.name == "postgresql" else ""
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}"{suffix}'))
+
+
+def _reset_table(table: Table, *, recreate: bool = True, cascade: bool = False) -> None:
+    engine = require_db_engine()
+    if cascade and engine.dialect.name == "postgresql":
+        _drop_table_by_name(engine, table.name, cascade=True)
+    else:
+        table.drop(engine, checkfirst=True)
+    if recreate:
+        table.create(engine, checkfirst=True)
+
+
+def _reset_skills_storage_tables(engine: Engine) -> None:
+    _reset_table(SKILLS_ITEMS_TABLE, recreate=False)
+    _reset_table(SKILLS_SNAPSHOTS_TABLE, recreate=False, cascade=True)
+    SKILLS_SNAPSHOTS_TABLE.create(engine, checkfirst=True)
+    SKILLS_ITEMS_TABLE.create(engine, checkfirst=True)
+
+
+def _skills_storage_has_data(engine: Engine) -> bool:
+    if _count_table_rows(SKILLS_SNAPSHOTS_TABLE) <= 0:
+        return False
+    with engine.connect() as conn:
+        item_count = conn.execute(select(func.count()).select_from(SKILLS_ITEMS_TABLE)).scalar_one()
+    return int(item_count) > 0
+
+
+def _migrate_legacy_skills_storage(engine: Engine) -> bool:
+    inspector = inspect(engine)
+    if _count_table_rows(SKILLS_SNAPSHOTS_TABLE) > 0:
+        return False
+    if not inspector.has_table(_LEGACY_SKILLS_SNAPSHOT_TABLE_NAME) or not inspector.has_table(_LEGACY_SKILLS_ITEMS_PAYLOAD_TABLE_NAME):
+        return False
+
+    legacy_snapshot_df = pd.read_sql(
+        text(
+            """
+            SELECT snapshot_id, version, saved_at, global_sigma, global_weight
+            FROM skills_snapshot
+            ORDER BY saved_at DESC
+            LIMIT 1
+            """
+        ),
+        engine,
+    )
+    if legacy_snapshot_df.empty:
+        return False
+
+    legacy_snapshot = legacy_snapshot_df.iloc[0].to_dict()
+    legacy_items_df = pd.read_sql(
+        text(
+            """
+            SELECT short_name, algorithm_type, sigma_param, expert_weight,
+                   alignment_rate, lower_bound, upper_bound, base_price
+            FROM skills_items_payload
+            WHERE snapshot_id = :snapshot_id
+            ORDER BY short_name
+            """
+        ),
+        engine,
+        params={"snapshot_id": str(legacy_snapshot["snapshot_id"])},
+    )
+    if legacy_items_df.empty:
+        return False
+
+    legacy_saved_at = pd.to_datetime(legacy_snapshot.get("saved_at"), errors="coerce")
+    if pd.isna(legacy_saved_at):
+        legacy_saved_at = datetime.now()
+
+    snapshot_row = _rows_from_dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "snapshot_id": str(legacy_snapshot["snapshot_id"]),
+                    "version": str(legacy_snapshot.get("version") or "1.0"),
+                    "saved_at": legacy_saved_at,
+                    "global_sigma": float(legacy_snapshot.get("global_sigma") or 1.0),
+                    "global_weight": int(legacy_snapshot.get("global_weight") or 80),
+                }
+            ]
+        )
+    )
+
+    normalized_items = legacy_items_df.copy()
+    normalized_items["snapshot_id"] = str(legacy_snapshot["snapshot_id"])
+    normalized_items["short_name"] = normalized_items["short_name"].astype(str)
+    normalized_items["algorithm_type"] = normalized_items["algorithm_type"].fillna("").astype(str)
+    for numeric_column in [
+        "sigma_param",
+        "expert_weight",
+        "alignment_rate",
+        "lower_bound",
+        "upper_bound",
+        "base_price",
+    ]:
+        normalized_items[numeric_column] = pd.to_numeric(normalized_items[numeric_column], errors="coerce")
+
+    item_rows = _rows_from_dataframe(
+        normalized_items[
+            [
+                "snapshot_id",
+                "short_name",
+                "algorithm_type",
+                "sigma_param",
+                "expert_weight",
+                "alignment_rate",
+                "lower_bound",
+                "upper_bound",
+                "base_price",
+            ]
+        ]
+    )
+
+    with engine.begin() as conn:
+        conn.execute(SKILLS_SNAPSHOTS_TABLE.insert(), snapshot_row)
+        conn.execute(SKILLS_ITEMS_TABLE.insert(), item_rows)
+    print("[skills] 已将 legacy skills_snapshot / skills_items_payload 迁移到新结构")
+    return True
+
+
+def _drop_legacy_skills_tables(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table(_LEGACY_SKILLS_SNAPSHOT_TABLE_NAME) and not inspector.has_table(_LEGACY_SKILLS_ITEMS_PAYLOAD_TABLE_NAME):
+        return
+    if not _skills_storage_has_data(engine):
+        return
+
+    _drop_table_by_name(engine, _LEGACY_SKILLS_ITEMS_PAYLOAD_TABLE_NAME, cascade=True)
+    _drop_table_by_name(engine, _LEGACY_SKILLS_SNAPSHOT_TABLE_NAME, cascade=True)
+    print("[skills] 已清理 legacy skills_snapshot / skills_items_payload 表")
+
+
+def _ensure_skills_storage_tables() -> None:
+    global _SKILLS_STORAGE_RESET_DONE
+
+    if _SKILLS_STORAGE_RESET_DONE or DB_ENGINE is None:
+        return
+
+    engine = require_db_engine()
+    actual_snapshots_columns = _get_table_columns(engine, SKILLS_SNAPSHOTS_TABLE.name)
+    actual_items_columns = _get_table_columns(engine, SKILLS_ITEMS_TABLE.name)
+    expected_snapshots_columns = [column.name for column in SKILLS_SNAPSHOTS_TABLE.columns]
+    expected_items_columns = [column.name for column in SKILLS_ITEMS_TABLE.columns]
+
+    snapshots_mismatch = bool(actual_snapshots_columns) and actual_snapshots_columns != expected_snapshots_columns
+    items_mismatch = bool(actual_items_columns) and actual_items_columns != expected_items_columns
+
+    if snapshots_mismatch or items_mismatch:
+        if snapshots_mismatch:
+            print(f"[skills] 检测到旧表结构，重建 {SKILLS_SNAPSHOTS_TABLE.name}: {actual_snapshots_columns}")
+        if items_mismatch:
+            print(f"[skills] 检测到旧表结构，重建 {SKILLS_ITEMS_TABLE.name}: {actual_items_columns}")
+        _reset_skills_storage_tables(engine)
+    else:
+        if not actual_snapshots_columns:
+            SKILLS_SNAPSHOTS_TABLE.create(engine, checkfirst=True)
+        if not actual_items_columns:
+            SKILLS_ITEMS_TABLE.create(engine, checkfirst=True)
+
+    _migrate_legacy_skills_storage(engine)
+    _drop_legacy_skills_tables(engine)
+
+    _SKILLS_STORAGE_RESET_DONE = True
 
 
 def _import_feedback_from_legacy_csv() -> None:
@@ -1962,7 +2191,8 @@ def _import_skills_from_legacy_json() -> None:
     if not _LEGACY_SKILLS_PATH.exists():
         return
 
-    has_snapshot = _count_table_rows(SKILLS_SNAPSHOT_TABLE) > 0
+    _ensure_skills_storage_tables()
+    has_snapshot = _count_table_rows(SKILLS_SNAPSHOTS_TABLE) > 0
     if has_snapshot and _latest_skills_snapshot_has_items():
         return
 
@@ -1970,10 +2200,10 @@ def _import_skills_from_legacy_json() -> None:
         latest_snapshot_id = _get_latest_skills_snapshot_id()
         if latest_snapshot_id:
             with require_db_engine().begin() as conn:
-                conn.execute(delete(SKILLS_PAYLOAD_ITEMS_TABLE))
+                conn.execute(delete(SKILLS_ITEMS_TABLE))
                 conn.execute(
-                    delete(SKILLS_SNAPSHOT_TABLE).where(
-                        SKILLS_SNAPSHOT_TABLE.c.snapshot_id == latest_snapshot_id
+                    delete(SKILLS_SNAPSHOTS_TABLE).where(
+                        SKILLS_SNAPSHOTS_TABLE.c.snapshot_id == latest_snapshot_id
                     )
                 )
 
@@ -2041,6 +2271,7 @@ def initialize_supabase_storage() -> None:
         print("Supabase Connection Verified")
         _import_feedback_from_legacy_csv()
         _import_skills_from_legacy_json()
+        _drop_legacy_skills_tables(engine)
         _import_core_records_from_legacy_source()
         _DB_INIT_ERROR = None
     except Exception as exc:
