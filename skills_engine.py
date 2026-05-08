@@ -19,6 +19,31 @@ import processor
 # ── 1. Skills 技能书 ──────────────────────────────────────────────────────
 
 
+def _normalize_semantic_report(report: Optional[dict] = None) -> Dict[str, object]:
+    report = report or {}
+
+    raw_modes = report.get("主要匹配方式", [])
+    if not isinstance(raw_modes, list):
+        raw_modes = [raw_modes] if raw_modes else []
+    modes = [str(value).strip() for value in raw_modes if str(value).strip()]
+
+    raw_refs = report.get("参考文本规律", [])
+    if not isinstance(raw_refs, list):
+        raw_refs = [raw_refs] if raw_refs else []
+    refs = [str(value).strip() for value in raw_refs if str(value).strip()]
+
+    try:
+        count = int(report.get("引用规律数", len(set(refs)) if refs else 0))
+    except (TypeError, ValueError):
+        count = len(set(refs)) if refs else 0
+
+    return {
+        "引用规律数": max(count, len(set(refs)) if refs else 0),
+        "主要匹配方式": list(dict.fromkeys(modes)),
+        "参考文本规律": list(dict.fromkeys(refs)),
+    }
+
+
 def extract_skills(
     anomaly_df: pd.DataFrame,
     expert_labels: Dict[str, str],
@@ -79,6 +104,37 @@ def extract_skills(
             },
         }
 
+        ai_analyses = []
+        if "AI 辅助分析" in group.columns:
+            ai_analyses = [
+                text.strip()
+                for text in group["AI 辅助分析"].fillna("").astype(str).tolist()
+                if text and text.strip()
+            ]
+        ai_match_modes = []
+        if "_ai_match_scope" in group.columns:
+            ai_match_modes = [
+                text.strip()
+                for text in group["_ai_match_scope"].fillna("").astype(str).tolist()
+                if text and text.strip()
+            ]
+        ai_rule_ids = []
+        if "_ai_rule_id" in group.columns:
+            ai_rule_ids = [
+                text.strip()
+                for text in group["_ai_rule_id"].fillna("").astype(str).tolist()
+                if text and text.strip()
+            ]
+        unique_analyses = list(dict.fromkeys(ai_analyses))[:3]
+        unique_modes = list(dict.fromkeys(ai_match_modes))[:3]
+        skill["语义校准报告"] = _normalize_semantic_report(
+            {
+                "引用规律数": len(set(ai_rule_ids)) if ai_rule_ids else len(unique_analyses),
+                "主要匹配方式": unique_modes,
+                "参考文本规律": unique_analyses,
+            }
+        )
+
         # ── 经验对齐率：专家标注"正常"的记录中，实际落在合理区间内的比例 ──
         if has_rk and expert_count > 0:
             lower = float(group["合理下限"].iloc[0])
@@ -132,6 +188,10 @@ def skills_to_markdown(skills: List[dict]) -> str:
             lines.append(f"- **经验对齐率**: {align:.2%}")
         else:
             lines.append(f"- **经验对齐率**: {align}")
+        semantic_report = _normalize_semantic_report(sk.get("语义校准报告", {}))
+        semantic_refs = semantic_report.get("参考文本规律", [])
+        semantic_modes = semantic_report.get("主要匹配方式", [])
+        semantic_count = semantic_report.get("引用规律数", 0)
         lines.append("")
 
         bounds = sk["成本合理区间边界"]
@@ -163,6 +223,21 @@ def skills_to_markdown(skills: List[dict]) -> str:
         lines.append("|------|------|")
         for k, v in stats.items():
             lines.append(f"| {k} | {v} |")
+        lines.append("")
+
+        lines.append("### 语义校准报告")
+        lines.append("")
+        lines.append(f"- **引用规律数**: {semantic_count}")
+        if semantic_modes:
+            lines.append(f"- **主要匹配方式**: {' / '.join(semantic_modes)}")
+        else:
+            lines.append("- **主要匹配方式**: 无")
+        if semantic_refs:
+            lines.append("- **参考文本规律**:")
+            for ref in semantic_refs:
+                lines.append(f"  - {ref}")
+        else:
+            lines.append("- **参考文本规律**: 无")
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -375,6 +450,10 @@ def generate_audit_report(
     report["最终优化结论"] = report["_record_key"].map(
         lambda k: opt_map.get(k, "—")
     )
+
+    if "AI 辅助分析" in optimized_df.columns:
+        ai_map = dict(zip(optimized_df["_record_key"], optimized_df["AI 辅助分析"].fillna("")))
+        report["AI辅助分析"] = report["_record_key"].map(lambda k: ai_map.get(k, ""))
 
     report = report.drop(columns=["_record_key"])
     return report

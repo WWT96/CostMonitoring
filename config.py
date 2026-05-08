@@ -1,65 +1,71 @@
 """配置管理
 ========
-读取顺序：项目根目录 .env 文件 → 系统环境变量 → 内置默认值。
+读取顺序：初始化参数 → 系统环境变量 → 项目根目录 .env 文件 → 内置默认值。
 部署时在同目录下创建 .env 文件，或直接设置系统环境变量。
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-# 加载 .env 文件（优先于系统环境变量；文件不存在时静默跳过）
+from dotenv import load_dotenv
+
+load_dotenv()
+
 try:
-    from dotenv import load_dotenv
-
-    load_dotenv(Path(__file__).parent / ".env", override=False)
+    from pydantic.v1 import BaseSettings, Field, validator
 except ImportError:
-    pass  # python-dotenv 未安装时回退到系统环境变量
+    from pydantic import BaseSettings, Field, validator  # type: ignore
 
 
-class _Settings:
-    """通过属性动态读取环境变量，确保每次调用都能获取最新值。"""
+_ENV_FILE = Path(__file__).parent / ".env"
+
+
+class Settings(BaseSettings):
+    """统一配置入口，使用 Field(..., env=...) 显式映射环境变量。"""
+
+    api_auth_token: str = Field("changeme-please-rotate", env="API_AUTH_TOKEN")
+    enterprise_system_url: str = Field("", env="ENTERPRISE_SYSTEM_URL")
+    api_data_cache_path: str = Field("api_cache.parquet", env="API_DATA_CACHE_PATH")
+    api_host: str = Field("0.0.0.0", env="API_HOST")
+    api_port: int = Field(8000, env="API_PORT")
+    db_url: str = Field("", env="DB_URL")
+    llm_api_key: str = Field("", env="LLM_API_KEY")
+    llm_api_base_url: str = Field("https://api.deepseek.com", env="LLM_API_BASE_URL")
+    llm_api_model: str = Field("deepseek-chat", env="LLM_API_MODEL")
+    llm_timeout_seconds: int = Field(45, env="LLM_TIMEOUT_SECONDS")
+    llm_temperature: float = Field(0.2, env="LLM_TEMPERATURE")
+    reset_cost_anomaly_results_on_start: bool = Field(False, env="RESET_COST_ANOMALY_RESULTS_ON_START")
+
+    @validator(
+        "api_auth_token",
+        "enterprise_system_url",
+        "api_data_cache_path",
+        "api_host",
+        "db_url",
+        "llm_api_key",
+        "llm_api_base_url",
+        "llm_api_model",
+        pre=True,
+    )
+    def _strip_string_values(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    class Config:
+        env_file = str(_ENV_FILE)
+        env_file_encoding = "utf-8"
+        case_sensitive = False
 
     @property
-    def api_auth_token(self) -> str:
-        """API Bearer Token，企业系统调用时需在请求头中携带。
-        生产环境务必替换为高强度随机字符串（建议 32 位以上）。"""
-        return os.getenv("API_AUTH_TOKEN", "changeme-please-rotate")
+    def llm_model(self) -> str:
+        """兼容旧字段名；统一转发到 llm_api_model。"""
+        return self.llm_api_model
 
     @property
-    def enterprise_system_url(self) -> str:
-        """企业 Java 系统的 API 地址（保留字段，供未来主动拉取数据使用）。"""
-        return os.getenv("ENTERPRISE_SYSTEM_URL", "")
-
-    @property
-    def api_data_cache_path(self) -> str:
-        """API 服务持久化缓存的 Parquet 文件路径（相对于项目根目录）。"""
-        return os.getenv("API_DATA_CACHE_PATH", "api_cache.parquet")
-
-    @property
-    def api_host(self) -> str:
-        """API 服务监听地址。"""
-        return os.getenv("API_HOST", "0.0.0.0")
-
-    @property
-    def api_port(self) -> int:
-        """API 服务监听端口。"""
-        return int(os.getenv("API_PORT", "8000"))
-
-    @property
-    def db_url(self) -> str:
-        """Supabase PostgreSQL 连接串。"""
-        return os.getenv("DB_URL", "").strip()
-
-    @property
-    def reset_cost_anomaly_results_on_start(self) -> bool:
-        """是否在启动初始化时强制重置 cost_anomaly_results 表。"""
-        return os.getenv("RESET_COST_ANOMALY_RESULTS_ON_START", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+    def llm_enabled(self) -> bool:
+        """LLM 是否已配置可用的 API Key。"""
+        return bool(self.llm_api_key)
 
 
-settings = _Settings()
+settings = Settings()

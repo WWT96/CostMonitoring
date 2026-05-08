@@ -1,5 +1,6 @@
 
 import io
+import re
 import time
 from datetime import datetime
 
@@ -11,7 +12,9 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+import llm_engine
 import processor
+import ui_utils
 
 st.set_page_config(
     page_title="备件成本监控看板",
@@ -21,15 +24,48 @@ st.set_page_config(
 )
 
 
+def ensure_storage_initialized():
+    if st.session_state.get("_storage_initialized", False):
+        return
+    processor.service.initialize_storage()
+    st.session_state["_storage_initialized"] = True
+
+
 def inject_css(is_overview: bool = False):
     base_css = """
     <style>
         .main .block-container {
             padding-top: 1rem !important;
             padding-bottom: 0rem !important;
-            padding-left: 2rem !important;
-            padding-right: 2rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
             max-width: 98% !important;
+        }
+        [data-testid="stDataEditor"],
+        [data-testid="stDataFrame"] {
+            width: 100% !important;
+        }
+        [data-testid="stDataEditor"] [role="grid"],
+        [data-testid="stDataFrame"] [role="grid"] {
+            border: 1px solid #e9ecef;
+            border-radius: 10px;
+            overflow-x: auto !important;
+        }
+        [data-testid="stDataEditor"] [role="columnheader"],
+        [data-testid="stDataFrame"] [role="columnheader"] {
+            justify-content: center !important;
+            text-align: center !important;
+        }
+        [data-testid="stDataEditor"] [role="gridcell"],
+        [data-testid="stDataFrame"] [role="gridcell"] {
+            justify-content: flex-start !important;
+            text-align: left !important;
+        }
+        [data-testid="stDataEditor"] [role="gridcell"] *,
+        [data-testid="stDataFrame"] [role="gridcell"] * {
+            white-space: pre-wrap !important;
+            word-break: break-word !important;
+            line-height: 1.35 !important;
         }
         [data-testid="stSidebarCollapseButton"] {
             z-index: 99999 !important;
@@ -141,6 +177,340 @@ def inject_css(is_overview: bool = False):
             unsafe_allow_html=True,
         )
 
+
+def get_table_height(row_count: int, min_height: int = 180, max_height: int = 560) -> int:
+    return max(min_height, min(max_height, 38 + 35 * max(row_count, 1)))
+
+
+def prepare_table_view(
+    source_df: pd.DataFrame,
+    key_prefix: str,
+    *,
+    display_columns: list[str] | None = None,
+    default_search_columns: list[str] | None = None,
+    locked_columns: list[str] | None = None,
+    filter_title: str = "当前表格",
+) -> tuple[pd.DataFrame, list[str]]:
+    allowed_columns = [
+        column_name
+        for column_name in (display_columns or source_df.columns.tolist())
+        if column_name in source_df.columns
+    ]
+    if not allowed_columns:
+        return source_df.copy(), []
+    if source_df.empty:
+        return source_df.copy(), allowed_columns
+
+    default_search_columns = [
+        column_name
+        for column_name in (default_search_columns or allowed_columns[: min(4, len(allowed_columns))])
+        if column_name in allowed_columns
+    ] or allowed_columns[: min(4, len(allowed_columns))]
+    locked_columns = [column_name for column_name in (locked_columns or []) if column_name in allowed_columns]
+
+    filter_priority = [
+        "status",
+        "结论状态",
+        "工厂",
+        "备件简称",
+        "适用车系",
+        "当前标注",
+        "专家反馈",
+        "最终优化结论",
+        "供应商代码",
+    ]
+    filter_candidates: list[str] = []
+    seen_columns: set[str] = set()
+    for column_name in filter_priority + allowed_columns:
+        if column_name in seen_columns or column_name not in allowed_columns:
+            continue
+        unique_count = source_df[column_name].dropna().astype(str).nunique()
+        if 1 < unique_count <= 40:
+            filter_candidates.append(column_name)
+            seen_columns.add(column_name)
+        if len(filter_candidates) >= 4:
+            break
+
+    category_filters: dict[str, list[str]] = {}
+    with st.expander(f"🔎 表格筛选与列显示 · {filter_title}", expanded=False):
+        filter_c1, filter_c2 = st.columns([2, 2])
+        with filter_c1:
+            search_columns = st.multiselect(
+                "搜索列",
+                options=allowed_columns,
+                default=default_search_columns,
+                key=f"{key_prefix}_search_columns",
+            )
+        with filter_c2:
+            keyword = st.text_input(
+                "关键词搜索",
+                key=f"{key_prefix}_keyword",
+                placeholder="支持空格分隔多关键词，例如 远景Max 异常偏高",
+            )
+
+        selected_visible_columns = st.multiselect(
+            "显示列",
+            options=allowed_columns,
+            default=allowed_columns,
+            key=f"{key_prefix}_visible_columns",
+        )
+
+        if filter_candidates:
+            filter_columns = st.columns(len(filter_candidates))
+            for idx, column_name in enumerate(filter_candidates):
+                options = sorted(source_df[column_name].dropna().astype(str).unique().tolist())
+                with filter_columns[idx]:
+                    category_filters[column_name] = st.multiselect(
+                        f"{column_name} 筛选",
+                        options=options,
+                        key=f"{key_prefix}_filter_{column_name}",
+                    )
+        else:
+            keyword = st.session_state.get(f"{key_prefix}_keyword", "")
+            search_columns = st.session_state.get(f"{key_prefix}_search_columns", default_search_columns)
+
+    filtered_df = source_df.copy()
+    search_columns = [column_name for column_name in search_columns if column_name in filtered_df.columns]
+    if keyword and search_columns:
+        combined_text = filtered_df[search_columns].fillna("").astype(str).agg(" | ".join, axis=1).str.lower()
+        search_mask = pd.Series(True, index=filtered_df.index)
+        for token in [token.strip().lower() for token in keyword.split() if token.strip()]:
+            search_mask &= combined_text.str.contains(re.escape(token), regex=True, na=False)
+        filtered_df = filtered_df[search_mask]
+
+    for column_name, selected_values in category_filters.items():
+        if selected_values:
+            filtered_df = filtered_df[
+                filtered_df[column_name].fillna("").astype(str).isin(selected_values)
+            ]
+
+    visible_columns = [column_name for column_name in selected_visible_columns if column_name in allowed_columns]
+    if locked_columns:
+        visible_columns = locked_columns + [
+            column_name for column_name in visible_columns if column_name not in locked_columns
+        ]
+    visible_columns = visible_columns or allowed_columns
+    return filtered_df, visible_columns
+
+
+def build_table_column_config(
+    display_df: pd.DataFrame,
+    *,
+    overrides: dict[str, object] | None = None,
+    editable_columns: list[str] | None = None,
+) -> dict[str, object]:
+    overrides = overrides or {}
+    editable_set = set(editable_columns or [])
+    percent_columns = {"偏离比例", "可信度"}
+    money_like_columns = {
+        "最新成本",
+        "实际成本",
+        "预测值",
+        "合理下限",
+        "合理上限",
+        "偏离数值",
+        "成本数值",
+        "一级总成成本",
+        "子零件加权总和",
+        "测算总成成本",
+        "基准价",
+    }
+    integer_like_columns = {"样本量", "子零件数量"}
+    named_large_text_columns = {"AI 辅助分析", "AI辅助分析", "经验规律", "标注备注", "专家备注", "判定依据"}
+
+    final_config: dict[str, object] = {}
+    for column_name in display_df.columns:
+        if column_name in overrides:
+            final_config[column_name] = overrides[column_name]
+            continue
+
+        disabled = editable_columns is None or column_name not in editable_set
+        series = display_df[column_name]
+        sample_lengths = series.dropna().astype(str).str.len() if not series.empty else pd.Series(dtype=int)
+        is_large_text = column_name in named_large_text_columns or (not sample_lengths.empty and sample_lengths.max() > 36)
+
+        if pd.api.types.is_bool_dtype(series):
+            final_config[column_name] = st.column_config.CheckboxColumn(column_name, disabled=disabled)
+        elif column_name == "测算比值":
+            final_config[column_name] = st.column_config.TextColumn(column_name, disabled=disabled)
+        elif column_name in percent_columns:
+            final_config[column_name] = st.column_config.NumberColumn(column_name, disabled=disabled, format="%.2%%")
+        elif column_name in integer_like_columns or pd.api.types.is_integer_dtype(series):
+            final_config[column_name] = st.column_config.NumberColumn(column_name, disabled=disabled, format="%d")
+        elif column_name in money_like_columns or pd.api.types.is_float_dtype(series):
+            final_config[column_name] = st.column_config.NumberColumn(column_name, disabled=disabled, format="%.2f")
+        else:
+            final_config[column_name] = st.column_config.TextColumn(
+                column_name,
+                disabled=disabled,
+                width="large" if is_large_text else "medium",
+            )
+    return final_config
+
+
+def render_standard_data_editor(
+    display_df: pd.DataFrame,
+    key_prefix: str,
+    *,
+    editable_columns: list[str] | None = None,
+    column_config: dict[str, object] | None = None,
+    max_height: int = 560,
+):
+    final_config = build_table_column_config(
+        display_df,
+        overrides=column_config,
+        editable_columns=editable_columns,
+    )
+    if editable_columns is None:
+        disabled_setting: bool | list[str] = True
+    else:
+        editable_set = set(editable_columns)
+        disabled_setting = [column_name for column_name in display_df.columns if column_name not in editable_set]
+
+    return st.data_editor(
+        display_df,
+        column_config=final_config,
+        disabled=disabled_setting,
+        use_container_width=True,
+        hide_index=True,
+        height=get_table_height(len(display_df), max_height=max_height),
+        key=f"{key_prefix}_grid",
+    )
+
+
+def build_calibration_management_df(
+    label_details: dict[str, dict[str, str]],
+    *,
+    core_source_df: pd.DataFrame | None = None,
+    fallback_source_df: pd.DataFrame | None = None,
+    fallback_price_col: str = "",
+) -> pd.DataFrame:
+    display_columns = [
+        "物料编码",
+        "物料名称",
+        "备件简称",
+        "工厂",
+        "价格有效期于",
+        "价格",
+        "当前标注",
+        "标注备注",
+        "撤回标注",
+    ]
+    rows = []
+    for record_key, payload in label_details.items():
+        parsed = processor.split_record_key(record_key)
+        rows.append(
+            {
+                "record_key": parsed["record_key"],
+                "物料编码": parsed["物料编码"],
+                "工厂": parsed["工厂"],
+                "价格有效期于": parsed["价格有效期于"],
+                "价格": parsed["价格"],
+                "当前标注": payload.get("label", ""),
+                "标注备注": payload.get("remark", ""),
+                "撤回标注": False,
+                "_join_date_key": parsed["_join_date_key"],
+                "_join_price_key": parsed["_join_price_key"],
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["record_key"] + display_columns)
+
+    def _normalize_lookup_frame(source_df: pd.DataFrame | None, price_column: str = "") -> pd.DataFrame:
+        if source_df is None or source_df.empty or "物料编码" not in source_df.columns:
+            return pd.DataFrame(
+                columns=["物料编码", "物料名称", "备件简称", "工厂", "_join_date_key", "_join_price_key", "monitor_date"]
+            )
+
+        lookup_df = source_df.copy()
+        if "monitor_date" in lookup_df.columns:
+            lookup_df["monitor_date"] = pd.to_datetime(lookup_df["monitor_date"], errors="coerce")
+        elif "价格有效于" in lookup_df.columns:
+            lookup_df["monitor_date"] = pd.to_datetime(lookup_df["价格有效于"], errors="coerce")
+        else:
+            lookup_df["monitor_date"] = pd.NaT
+
+        if "成本" in lookup_df.columns:
+            lookup_df["价格"] = pd.to_numeric(lookup_df["成本"], errors="coerce")
+        elif price_column and price_column in lookup_df.columns:
+            lookup_df["价格"] = pd.to_numeric(lookup_df[price_column], errors="coerce")
+        elif "实际成本" in lookup_df.columns:
+            lookup_df["价格"] = pd.to_numeric(lookup_df["实际成本"], errors="coerce")
+        else:
+            lookup_df["价格"] = np.nan
+
+        lookup_df["物料编码"] = lookup_df["物料编码"].fillna("").astype(str)
+        for column_name in ["物料名称", "备件简称", "工厂"]:
+            if column_name not in lookup_df.columns:
+                lookup_df[column_name] = ""
+            lookup_df[column_name] = lookup_df[column_name].fillna("").astype(str)
+
+        lookup_df["_join_date_key"] = lookup_df["monitor_date"].dt.strftime("%Y-%m-%d").fillna("")
+        lookup_df["_join_price_key"] = lookup_df["价格"].apply(
+            lambda value: f"{float(value):.4f}" if pd.notna(value) else ""
+        )
+        lookup_df = lookup_df.sort_values("monitor_date", na_position="last")
+        return lookup_df[
+            ["物料编码", "物料名称", "备件简称", "工厂", "_join_date_key", "_join_price_key", "monitor_date"]
+        ]
+
+    base_df = pd.DataFrame(rows)
+    lookup_frames = []
+    primary_lookup_df = _normalize_lookup_frame(core_source_df)
+    if not primary_lookup_df.empty:
+        lookup_frames.append(primary_lookup_df.assign(_source_priority=0))
+    fallback_lookup_df = _normalize_lookup_frame(fallback_source_df, fallback_price_col)
+    if not fallback_lookup_df.empty:
+        lookup_frames.append(fallback_lookup_df.assign(_source_priority=1))
+
+    if lookup_frames:
+        lookup_df = pd.concat(lookup_frames, ignore_index=True, sort=False)
+        lookup_df = lookup_df.sort_values(["_source_priority", "monitor_date"], na_position="last")
+
+        exact_lookup_df = lookup_df.drop_duplicates(
+            subset=["物料编码", "工厂", "_join_date_key", "_join_price_key"],
+            keep="first",
+        )
+        base_df = base_df.merge(
+            exact_lookup_df[
+                ["物料编码", "工厂", "_join_date_key", "_join_price_key", "物料名称", "备件简称"]
+            ],
+            on=["物料编码", "工厂", "_join_date_key", "_join_price_key"],
+            how="left",
+        )
+
+        fallback_name_df = lookup_df.drop_duplicates(subset=["物料编码"], keep="first").rename(
+            columns={
+                "物料名称": "_fallback_物料名称",
+                "备件简称": "_fallback_备件简称",
+            }
+        )
+        base_df = base_df.merge(
+            fallback_name_df[["物料编码", "_fallback_物料名称", "_fallback_备件简称"]],
+            on="物料编码",
+            how="left",
+        )
+        base_df["物料名称"] = (
+            base_df["物料名称"].astype("string")
+            .combine_first(base_df["_fallback_物料名称"].astype("string"))
+            .fillna("")
+            .astype(str)
+        )
+        base_df["备件简称"] = (
+            base_df["备件简称"].astype("string")
+            .combine_first(base_df["_fallback_备件简称"].astype("string"))
+            .fillna("")
+            .astype(str)
+        )
+        base_df = base_df.drop(columns=["_fallback_物料名称", "_fallback_备件简称"], errors="ignore")
+    else:
+        base_df["物料名称"] = ""
+        base_df["备件简称"] = ""
+
+    return base_df[["record_key"] + display_columns].copy()
+
+
 def reset_search_callback():
     st.session_state.search_code = ""
     st.session_state.search_name = ""
@@ -195,9 +565,14 @@ def cached_anomaly_report_weighted(
 def cached_load_api_data(refresh_token: float):
     """从 Supabase 的 core_cost_records 表加载数据。refresh_token 用于手动失效缓存。"""
     try:
-        return processor.load_core_cost_records()
+        return processor.service.load_core_cost_records()
     except Exception as e:
         return None, None, f"读取数据库失败: {e}"
+
+
+@st.cache_data
+def cached_enrich_anomaly_with_ai(result_df: pd.DataFrame, knowledge_refresh_token: float):
+    return processor.enrich_anomaly_with_inferred_reasons(result_df)
 
 
 def require_price_col(df):
@@ -220,6 +595,29 @@ def set_loaded_data(df, price_col: str, origin: str):
     st.session_state.loaded_data_origin = origin
 
 
+def sync_ai_knowledge_base(force_full: bool = False, spinner_text: str = "🤖 正在同步更新 AI 知识库..."):
+    with st.spinner(spinner_text):
+        sync_result = llm_engine.sync_expert_knowledge_base(force_full=force_full)
+    st.session_state.knowledge_sync_status = sync_result
+    return sync_result
+
+
+def render_knowledge_sync_status():
+    sync_result = st.session_state.get("knowledge_sync_status")
+    if not sync_result:
+        return
+    message = str(sync_result.get("message", "")).strip()
+    if not message:
+        return
+    status = sync_result.get("status", "")
+    if status == "success":
+        st.success(f"🤖 {message}")
+    elif status in {"no_changes", "no_data", "skipped"}:
+        st.info(f"🤖 {message}")
+    else:
+        st.warning(f"🤖 {message}")
+
+
 for key, default in {
     "data": None,
     "price_col": "",
@@ -234,9 +632,14 @@ for key, default in {
     "vehicle_rank_text": "",
     "vehicle_rank": [],
     "active_page": "概览",
+    "knowledge_sync_status": None,
+    "_storage_initialized": False,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+ensure_storage_initialized()
 
 
 st.sidebar.title("🚀 功能导航")
@@ -386,7 +789,7 @@ if page == "概览":
                 if st.button("☁️ 同步数据到云端数据库", use_container_width=True):
                     try:
                         with st.spinner("正在写入 Supabase 云端数据库..."):
-                            synced_rows = processor.persist_core_cost_records(
+                            synced_rows = processor.service.sync_core_cost_records(
                                 st.session_state.data,
                                 price_col=require_price_col(st.session_state.data),
                                 mode="full",
@@ -499,10 +902,17 @@ elif page in ["全量成本报表", "成本变动趋势"]:
             st.session_state.search_name,
         )
 
+        filtered_df, visible_columns = prepare_table_view(
+            filtered_df,
+            f"{page}_report_table",
+            default_search_columns=["物料编码", "物料名称", "备件简称", "适用车系", "工厂"],
+            filter_title=page,
+        )
+
         with c4:
             st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             try:
-                excel_data = processor.to_excel_bytes(filtered_df)
+                excel_data = processor.to_excel_bytes(filtered_df[visible_columns])
                 file_name = f"{page}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                 st.download_button(
                     "📥 导出报表",
@@ -516,20 +926,10 @@ elif page in ["全量成本报表", "成本变动趋势"]:
 
         page_info = processor.paginate_by_material(filtered_df, st.session_state.report_page_number, 50)
         st.session_state.report_page_number = page_info["page_number"]
-        page_data = page_info["page_df"]
+        page_data = page_info["page_df"][visible_columns]
 
         st.markdown(f"**共找到 {len(filtered_df)} 条匹配记录**")
-
-        value_prefix = "变动趋势" if page == "成本变动趋势" else "价格变动"
-        value_cols = [col for col in page_data.columns if col.startswith(value_prefix)]
-        value_cols.sort(key=lambda x: int("".join(filter(str.isdigit, x)) or 0))
-
-        html = processor.render_merged_html_table(
-            page_data,
-            value_cols,
-            is_trend_mode=(page == "成本变动趋势"),
-        )
-        st.markdown(html, unsafe_allow_html=True)
+        render_standard_data_editor(page_data, f"{page}_report_page", max_height=620)
 
         st.markdown("---")
         p1, p2, p3 = st.columns([1, 1, 3])
@@ -584,11 +984,22 @@ elif page == "车系梯度成本对比":
         selected_part = st.selectbox("备件简称筛选", part_options)
         compare_df = cached_vehicle_compare(df, price_col, selected_part, tuple(st.session_state.vehicle_rank))
 
+        compare_df, compare_visible_columns = prepare_table_view(
+            compare_df,
+            "vehicle_compare_table",
+            default_search_columns=["适用车系", "备件简称", "最新成本"],
+            filter_title="车系梯度成本对比",
+        )
+
         st.markdown(f"**共找到 {len(compare_df)} 条匹配记录**")
-        st.markdown(processor.render_center_table_html(compare_df), unsafe_allow_html=True)
+        render_standard_data_editor(
+            compare_df[compare_visible_columns],
+            "vehicle_compare_table",
+            max_height=500,
+        )
 
         try:
-            export_data = processor.to_excel_bytes(compare_df)
+            export_data = processor.to_excel_bytes(compare_df[compare_visible_columns])
             st.download_button(
                 "📥 导出对比结果",
                 data=export_data,
@@ -694,14 +1105,18 @@ elif page == "拆分件成本监控":
                     "结论状态": st.column_config.TextColumn("结论状态"),
                 }
 
-                st.data_editor(
+                display_df, subpart_visible_columns = prepare_table_view(
                     display_df,
+                    "subpart_table",
+                    default_search_columns=["一级总成料号", "一级总成品名描述", "结论状态"],
+                    filter_title="拆分件成本监控",
+                )
+
+                render_standard_data_editor(
+                    display_df[subpart_visible_columns],
+                    "subpart_table",
                     column_config=column_config,
-                    disabled=True,
-                    use_container_width=True,
-                    height=min(600, 35 * len(display_df) + 38),
-                    hide_index=True,
-                    key="subpart_table",
+                    max_height=600,
                 )
 
                 # ── 使用 HTML 展示颜色标注的结论状态 ──────────
@@ -723,7 +1138,7 @@ elif page == "拆分件成本监控":
 
                 # ── 导出按钮 ─────────────────────────────────
                 try:
-                    export_data = processor.to_excel_bytes(display_df)
+                    export_data = processor.to_excel_bytes(display_df[subpart_visible_columns])
                     st.download_button(
                         "📥 导出异常拆分件报表",
                         data=export_data,
@@ -751,51 +1166,117 @@ elif page == "异常成本监控体系":
                 key="anomaly_mode",
                 horizontal=True,
             )
+        label_details = processor.service.get_feedback_details()
+        label_statuses = {
+            record_key: payload.get("label", "")
+            for record_key, payload in label_details.items()
+        }
+        label_remarks = {
+            record_key: payload.get("remark", "")
+            for record_key, payload in label_details.items()
+        }
         with stat_col:
-            label_count = processor.label_manager.count()
+            label_count = len(label_details)
             st.metric("已由专家校准的记录", f"{label_count} 条")
+
+        render_knowledge_sync_status()
 
         # ── 专家校准管理中心 ─────────────────────────────────
         if label_count > 0:
             with st.expander("📋 查看/管理已校准记录", expanded=False):
-                all_labels = processor.label_manager.get_labels()
-                mgmt_rows = [
-                    {"记录主键": k, "当前标注": v} for k, v in all_labels.items()
-                ]
-                mgmt_df = pd.DataFrame(mgmt_rows)
-                mgmt_df["撤回标注"] = False
+                core_refresh_token = processor.get_core_cost_records_refresh_token()
+                core_source_df, _, core_source_error = cached_load_api_data(core_refresh_token)
+                if core_source_error and (core_source_df is None or core_source_df.empty):
+                    st.caption(f"主库关联提示：{core_source_error}")
 
-                mgmt_edited = st.data_editor(
-                    mgmt_df,
+                mgmt_df = build_calibration_management_df(
+                    label_details,
+                    core_source_df=core_source_df,
+                    fallback_source_df=df,
+                    fallback_price_col=price_col,
+                )
+                mgmt_display_columns = [
+                    "物料编码",
+                    "物料名称",
+                    "备件简称",
+                    "工厂",
+                    "价格有效期于",
+                    "价格",
+                    "当前标注",
+                    "标注备注",
+                    "撤回标注",
+                ]
+                mgmt_editor_source = mgmt_df.set_index("record_key", drop=True)
+
+                mgmt_filtered_df, mgmt_visible_columns = prepare_table_view(
+                    mgmt_editor_source,
+                    "calibration_mgmt",
+                    display_columns=mgmt_display_columns,
+                    default_search_columns=["物料编码", "物料名称", "备件简称", "工厂", "标注备注"],
+                    locked_columns=mgmt_display_columns,
+                    filter_title="已校准记录",
+                )
+                mgmt_edited = render_standard_data_editor(
+                    mgmt_filtered_df[mgmt_visible_columns],
+                    "calibration_mgmt",
+                    editable_columns=["标注备注", "撤回标注"],
                     column_config={
+                        "物料编码": st.column_config.TextColumn("物料编码", disabled=True),
+                        "物料名称": st.column_config.TextColumn("物料名称", disabled=True, width="large"),
+                        "备件简称": st.column_config.TextColumn("备件简称", disabled=True),
+                        "工厂": st.column_config.TextColumn("工厂", disabled=True),
+                        "价格有效期于": st.column_config.TextColumn("价格有效期于", disabled=True),
+                        "价格": st.column_config.NumberColumn("价格", disabled=True, format="%.4f"),
+                        "当前标注": st.column_config.TextColumn("当前标注", disabled=True),
                         "撤回标注": st.column_config.CheckboxColumn(
                             "撤回标注", help="勾选后点击下方按钮撤回此标注", default=False,
                         ),
-                        "记录主键": st.column_config.TextColumn("记录主键", disabled=True),
-                        "当前标注": st.column_config.TextColumn("当前标注", disabled=True),
+                        "标注备注": st.column_config.TextColumn(
+                            "标注备注",
+                            help="可直接编辑备注，例如材质、供应商或批次原因说明。",
+                            width="large",
+                        ),
                     },
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(300, 35 * len(mgmt_df) + 38),
-                    key="calibration_mgmt",
+                    max_height=320,
                 )
 
-                mgmt_c1, mgmt_c2 = st.columns(2)
+                mgmt_c1, mgmt_c2, mgmt_c3 = st.columns(3)
                 with mgmt_c1:
-                    if st.button("🗑️ 撤回选中的标注", type="primary"):
-                        keys_to_revoke = []
-                        for i, row in mgmt_edited.iterrows():
-                            if row["撤回标注"]:
-                                keys_to_revoke.append(mgmt_df.iloc[i]["记录主键"])
+                    if st.button("💾 保存修改", type="primary"):
+                        final_mgmt_df = mgmt_df.copy()
+                        edited_remark_map = {
+                            str(record_key): str(remark or "")
+                            for record_key, remark in zip(mgmt_edited.index, mgmt_edited["标注备注"])
+                        }
+                        final_mgmt_df["标注备注"] = final_mgmt_df["record_key"].astype(str).map(edited_remark_map).fillna(final_mgmt_df["标注备注"])
+                        final_labels_df = final_mgmt_df[["record_key", "当前标注", "标注备注"]].rename(
+                            columns={
+                                "当前标注": "label",
+                                "标注备注": "remark",
+                            }
+                        )
+                        processor.service.replace_feedback(final_labels_df)
+                        st.cache_data.clear()
+                        sync_ai_knowledge_base()
+                        st.success(f"✅ 已保存 {len(final_labels_df)} 条标注备注修改")
+                        time.sleep(0.5)
+                        st.rerun()
+                with mgmt_c2:
+                    if st.button("🗑️ 撤回选中的标注"):
+                        keys_to_revoke = [
+                            str(record_key)
+                            for record_key, row in mgmt_edited.iterrows()
+                            if bool(row["撤回标注"])
+                        ]
                         if keys_to_revoke:
-                            revoked = processor.label_manager.delete_labels(keys_to_revoke)
+                            revoked = processor.service.delete_feedback(keys_to_revoke)
                             st.cache_data.clear()
                             st.success(f"✅ 已撤回 {revoked} 条标注")
                             time.sleep(0.5)
                             st.rerun()
                         else:
                             st.warning("未选中任何记录")
-                with mgmt_c2:
+                with mgmt_c3:
                     if st.button("⚠️ 清空所有标注"):
                         st.session_state["_confirm_clear_labels"] = True
                     if st.session_state.get("_confirm_clear_labels"):
@@ -803,7 +1284,7 @@ elif page == "异常成本监控体系":
                         cc1, cc2 = st.columns(2)
                         with cc1:
                             if st.button("✅ 确认清空", type="primary"):
-                                processor.label_manager.clear_all()
+                                processor.service.clear_feedback()
                                 st.cache_data.clear()
                                 st.session_state["_confirm_clear_labels"] = False
                                 st.success("✅ 已清空所有标注")
@@ -839,7 +1320,7 @@ elif page == "异常成本监控体系":
         is_expert_mode = st.session_state.anomaly_mode == "优化后测算（专家纠偏）"
 
         # ── 闭环自学习：加载 Skills 技能书参数 ────────────────
-        _skills_data = processor.load_skills()
+        _skills_data = processor.service.load_skills_snapshot()
         _skills_json = ""
         _skills_loaded = False
         if _skills_data and is_expert_mode:
@@ -857,7 +1338,7 @@ elif page == "异常成本监控体系":
                 _skills_json = ""
 
         if is_expert_mode:
-            expert_labels = processor.label_manager.get_labels()
+            expert_labels = dict(label_statuses)
             if expert_labels:
                 working_df = cached_anomaly_report_weighted(
                     df, price_col, tuple(sorted(expert_labels.items())),
@@ -869,6 +1350,18 @@ elif page == "异常成本监控体系":
         else:
             working_df = anomaly_df.copy()
 
+        knowledge_refresh_token = processor.get_expert_knowledge_refresh_token()
+        working_df = cached_enrich_anomaly_with_ai(working_df, knowledge_refresh_token)
+
+        if "_record_key" in working_df.columns:
+            working_df["专家校准"] = working_df["_record_key"].astype(str).map(
+                lambda key: "✅" if label_statuses.get(key) == "正常" else ""
+            )
+            working_df["专家备注"] = working_df["_record_key"].astype(str).map(
+                lambda key: label_remarks.get(key, "")
+            )
+            working_df["专家备注"] = working_df["专家备注"].fillna("")
+
         # ── Skills 闭环状态提示 ───────────────────────────────
         if is_expert_mode:
             if _skills_loaded:
@@ -878,7 +1371,7 @@ elif page == "异常成本监控体系":
                     f"📘 正在应用来自数据库的最新 Skills 技能书（{_sk_count} 个备件简称，保存于 {_sk_time}），"
                     f"匹配的备件将使用个性化 σ/权重参数。"
                 )
-            elif _skills_data is None and processor.has_skills_snapshot():
+            elif _skills_data is None and processor.service.has_skills_snapshot():
                 st.warning("⚠️ Skills 技能书快照读取异常，已回退到默认算法。请重新运行 AutoResearch 生成。")
 
         # ── 顶部汇总 ──────────────────────────────────────────
@@ -921,21 +1414,43 @@ elif page == "异常成本监控体系":
 
         if not abnormal_view.empty and "_record_key" in abnormal_view.columns:
             edit_df = abnormal_view.copy()
-            existing_labels = processor.label_manager.get_labels()
+            existing_labels = dict(label_statuses)
+            existing_remarks = dict(label_remarks)
             edit_df["标注为正常"] = edit_df["_record_key"].apply(
                 lambda k: existing_labels.get(k) == "正常"
             )
+            edit_df["专家校准"] = edit_df["_record_key"].apply(
+                lambda k: "✅" if existing_labels.get(k) == "正常" else ""
+            )
+            edit_df["标注备注"] = edit_df["_record_key"].apply(
+                lambda k: existing_remarks.get(k, "")
+            )
+            edit_df["采纳AI建议"] = False
 
             display_cols = [c for c in edit_df.columns if c != "_record_key"]
-            if "标注为正常" in display_cols:
-                display_cols.remove("标注为正常")
-            display_cols = ["标注为正常"] + display_cols
+            if "专家备注" in display_cols:
+                display_cols.remove("专家备注")
+            priority_cols = [
+                column_name
+                for column_name in ["标注为正常", "标注备注", "采纳AI建议", "AI 辅助分析", "专家校准"]
+                if column_name in display_cols
+            ]
+            display_cols = priority_cols + [c for c in display_cols if c not in priority_cols]
 
             # 丰富 column_config：每列指定类型以获得内置筛选/排序能力
             column_config = {
                 "标注为正常": st.column_config.CheckboxColumn(
                     "标注为正常",
                     help="勾选此项将该记录标注为「正常」（专家纠偏）",
+                    default=False,
+                ),
+                "标注备注": st.column_config.TextColumn(
+                    "标注备注",
+                    help="填写专家备注；若勾选“采纳AI建议”，保存时会自动写入 AI 辅助分析文本。",
+                ),
+                "采纳AI建议": st.column_config.CheckboxColumn(
+                    "采纳AI建议",
+                    help="勾选后，保存时自动将 AI 辅助分析填入标注备注，并视为已校准。",
                     default=False,
                 ),
                 "物料编码": st.column_config.TextColumn("物料编码", disabled=True),
@@ -964,36 +1479,71 @@ elif page == "异常成本监控体系":
                     "偏离比例", disabled=True, format="%.2%%",
                 ),
                 "status": st.column_config.TextColumn("status", disabled=True),
+                "AI 辅助分析": st.column_config.TextColumn("AI 辅助分析", disabled=True),
             }
             if "专家校准" in display_cols:
                 column_config["专家校准"] = st.column_config.TextColumn("专家校准", disabled=True)
             if "判定依据" in display_cols:
                 column_config["判定依据"] = st.column_config.TextColumn("判定依据", disabled=True)
 
-            edited = st.data_editor(
-                edit_df[display_cols],
+            visible_edit_df, anomaly_visible_columns = prepare_table_view(
+                edit_df,
+                "anomaly_editor",
+                display_columns=display_cols,
+                default_search_columns=["物料编码", "物料名称", "备件简称", "适用车系", "status"],
+                locked_columns=["标注为正常", "标注备注", "采纳AI建议", "专家校准"],
+                filter_title="异常记录",
+            )
+            visible_edit_df = visible_edit_df.reset_index(drop=True)
+            edited = render_standard_data_editor(
+                visible_edit_df[anomaly_visible_columns],
+                "anomaly_editor",
+                editable_columns=["标注为正常", "标注备注", "采纳AI建议"],
                 column_config=column_config,
-                use_container_width=True,
-                height=420,
-                hide_index=True,
-                key="anomaly_editor",
+                max_height=460,
             )
 
             if st.button("💾 保存专家标注", type="primary"):
-                final_labels = dict(existing_labels)
-                for i, (_, orig_row) in enumerate(edit_df.iterrows()):
+                final_labels = {
+                    key: {
+                        "label": payload.get("label", ""),
+                        "remark": payload.get("remark", ""),
+                    }
+                    for key, payload in label_details.items()
+                }
+                for i, (_, orig_row) in enumerate(visible_edit_df.iterrows()):
                     rk = orig_row["_record_key"]
                     checked = bool(edited.iloc[i]["标注为正常"])
-                    if checked:
-                        final_labels[rk] = "正常"
-                    elif rk in final_labels and final_labels[rk] == "正常":
+                    adopt_ai = bool(edited.iloc[i].get("采纳AI建议", False))
+                    remark_text = str(edited.iloc[i].get("标注备注", "") or "").strip()
+                    if adopt_ai:
+                        ai_text = str(orig_row.get("AI 辅助分析", "") or "").strip()
+                        if ai_text:
+                            remark_text = ai_text
+                            checked = True
+
+                    should_keep = checked or bool(remark_text)
+                    if should_keep:
+                        final_labels[rk] = {
+                            "label": "正常",
+                            "remark": remark_text,
+                        }
+                    elif rk in final_labels and final_labels[rk].get("label") == "正常":
                         del final_labels[rk]
 
                 final_labels_df = pd.DataFrame(
-                    [{"record_key": key, "label": value} for key, value in final_labels.items()]
+                    [
+                        {
+                            "record_key": key,
+                            "label": value.get("label", ""),
+                            "remark": value.get("remark", ""),
+                        }
+                        for key, value in final_labels.items()
+                    ]
                 )
-                processor.label_manager._flush(final_labels_df)
+                processor.service.replace_feedback(final_labels_df)
                 st.cache_data.clear()
+                sync_ai_knowledge_base()
                 st.success(f"✅ 标注已保存！当前共 {len(final_labels)} 条专家校准记录。")
                 time.sleep(0.5)
                 st.rerun()
@@ -1001,7 +1551,14 @@ elif page == "异常成本监控体系":
             st.info("当前筛选条件下暂无异常记录。")
         else:
             # 无 _record_key 时仍展示 data_editor（只读），保留排序/筛选
-            _ro_cols = [c for c in abnormal_view.columns if c != "_record_key"]
+            abnormal_view, readonly_visible_columns = prepare_table_view(
+                abnormal_view,
+                "anomaly_readonly",
+                display_columns=[c for c in abnormal_view.columns if c != "_record_key"],
+                default_search_columns=["物料编码", "物料名称", "备件简称", "适用车系", "status"],
+                filter_title="异常记录（只读）",
+            )
+            _ro_cols = readonly_visible_columns
             _ro_config = {
                 "实际成本": st.column_config.NumberColumn("实际成本", format="%.2f"),
                 "预测值": st.column_config.NumberColumn("预测值", format="%.2f"),
@@ -1010,19 +1567,17 @@ elif page == "异常成本监控体系":
                 "偏离数值": st.column_config.NumberColumn("偏离数值", format="%.2f"),
                 "偏离比例": st.column_config.NumberColumn("偏离比例", format="%.2%%"),
             }
-            st.data_editor(
+            render_standard_data_editor(
                 abnormal_view[_ro_cols],
+                "anomaly_readonly",
                 column_config=_ro_config,
-                disabled=True,
-                use_container_width=True,
-                height=420,
-                hide_index=True,
-                key="anomaly_readonly",
+                max_height=460,
             )
 
         # ── 导出（包含所有计算指标，不限异常）──────────────────
         try:
-            export_df = filtered_anomaly_df.drop(columns=["_record_key"], errors="ignore")
+            export_df = abnormal_view.drop(columns=["_record_key"], errors="ignore")
+            export_df = export_df.drop(columns=[column_name for column_name in export_df.columns if str(column_name).startswith("_ai_")], errors="ignore")
             export_data = processor.to_excel_bytes(export_df)
             st.download_button(
                 "📥 导出异常成本报表",
@@ -1129,6 +1684,7 @@ elif page == "异常成本监控体系":
 elif page == "Skills 技能引擎":
     inject_css(is_overview=False)
     st.title("🧠 Skills 技能引擎")
+    render_knowledge_sync_status()
 
     if st.session_state.data is None:
         st.warning("⚠️ 请先在概览页配置数据路径并同步数据")
@@ -1148,19 +1704,19 @@ elif page == "Skills 技能引擎":
             st.info("当前数据暂无可检测记录。")
             st.stop()
 
-        expert_labels = processor.get_latest_feedback()
+        expert_labels = processor.service.get_feedback_statuses()
 
         # ── 防错校验：CSV 行数 vs 内存标注数不一致时强制清缓存 ──
-        _file_rows = processor.label_manager.file_row_count()
+        _file_rows = processor.service.get_feedback_row_count()
         if _file_rows != len(expert_labels):
             st.cache_data.clear()
-            expert_labels = processor.get_latest_feedback()
+            expert_labels = processor.service.get_feedback_statuses()
 
         # 若有专家标注，使用加权算法结果；否则使用原始结果
         if expert_labels:
             labels_tuple = tuple(sorted(expert_labels.items()))
             # 闭环：加载 Skills 参数用于加权检测
-            _sk_data = processor.load_skills()
+            _sk_data = processor.service.load_skills_snapshot()
             _sk_json_skills = ""
             if _sk_data:
                 try:
@@ -1183,6 +1739,9 @@ elif page == "Skills 技能引擎":
                 optimized_df = anomaly_df
         else:
             optimized_df = anomaly_df
+
+        knowledge_refresh_token = processor.get_expert_knowledge_refresh_token()
+        optimized_df = cached_enrich_anomaly_with_ai(optimized_df, knowledge_refresh_token)
 
         # ── Section 1: Skills 技能书 ──────────────────────────
         st.markdown("## 📋 Skills 技能书")
@@ -1234,6 +1793,86 @@ elif page == "Skills 技能引擎":
 
         st.markdown("---")
 
+        # ── Section 1.5: 专家经验看板 ───────────────────────
+        st.markdown("## 🧾 专家经验看板")
+        st.markdown("基于专家备注做增量知识蒸馏，沉淀为可复用的定价经验规则。")
+
+        kb_df = processor.load_expert_knowledge_base()
+        kb_c1, kb_c2, kb_c3 = st.columns(3)
+        with kb_c1:
+            st.metric("知识规则数", f"{len(kb_df)}")
+        with kb_c2:
+            if kb_df.empty or "updated_at" not in kb_df.columns or kb_df["updated_at"].isna().all():
+                st.metric("最近更新时间", "暂无")
+            else:
+                _latest_ts = pd.to_datetime(kb_df["updated_at"], errors="coerce").max()
+                st.metric("最近更新时间", _latest_ts.strftime("%Y-%m-%d %H:%M") if pd.notna(_latest_ts) else "暂无")
+        with kb_c3:
+            if st.button("🤖 刷新 AI 知识库"):
+                sync_ai_knowledge_base(force_full=False, spinner_text="🤖 正在蒸馏专家备注并刷新 AI 知识库...")
+                st.rerun()
+
+        llm_settings_ready = bool(settings.llm_api_key and settings.llm_api_base_url and settings.llm_api_model)
+
+        if kb_df.empty:
+            if llm_settings_ready:
+                st.info("当前还没有 AI 蒸馏出的专家经验规则。请先补充专家备注，然后保存备注或运行 AutoResearch。")
+            else:
+                st.info("LLM 尚未配置，当前无法生成 AI 经验规则。配置 `LLM_API_BASE_URL`、`LLM_API_KEY`、`LLM_API_MODEL` 后即可启用。")
+        else:
+            kb_view = kb_df.rename(
+                columns={
+                    "short_name": "备件简称",
+                    "supplier_code": "供应商代码",
+                    "vehicle_series": "适用车系",
+                    "rule_content": "经验规律",
+                    "confidence_score": "可信度",
+                    "updated_at": "更新时间",
+                }
+            )
+            kb_table_df, kb_visible_columns = prepare_table_view(
+                kb_view[["备件简称", "供应商代码", "适用车系", "经验规律", "可信度", "更新时间"]],
+                "knowledge_base_table",
+                default_search_columns=["备件简称", "供应商代码", "适用车系", "经验规律"],
+                filter_title="AI 经验库",
+            )
+            render_standard_data_editor(
+                kb_table_df[kb_visible_columns],
+                "knowledge_base_table",
+                column_config={
+                    "经验规律": st.column_config.TextColumn("经验规律", disabled=True, width="large"),
+                },
+                max_height=360,
+            )
+
+            with st.expander("预览 Markdown 格式报告", expanded=False):
+                st.markdown(llm_engine.knowledge_base_to_markdown(kb_df))
+
+            kb_dl1, kb_dl2, kb_dl3 = st.columns(3)
+            with kb_dl1:
+                st.download_button(
+                    "📥 下载 AI 经验库 (JSON)",
+                    data=llm_engine.knowledge_base_to_json_bytes(kb_df),
+                    file_name=f"expert_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                )
+            with kb_dl2:
+                st.download_button(
+                    "📥 下载 AI 经验库 (Markdown)",
+                    data=llm_engine.knowledge_base_to_markdown(kb_df).encode("utf-8"),
+                    file_name=f"expert_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                    mime="text/markdown",
+                )
+            with kb_dl3:
+                st.download_button(
+                    "📥 下载 AI 经验库 (Excel)",
+                    data=processor.to_excel_bytes(kb_table_df[kb_visible_columns]),
+                    file_name=f"expert_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+        st.markdown("---")
+
         # ── Section 2: AutoResearch 棘轮迭代 ─────────────────
         st.markdown("## 🔬 AutoResearch 棘轮迭代")
         st.markdown(
@@ -1278,27 +1917,48 @@ elif page == "Skills 技能引擎":
                 # 迭代历史
                 with st.expander("迭代历史", expanded=False):
                     history_df = pd.DataFrame(result["history"])
-                    st.dataframe(history_df, use_container_width=True, hide_index=True)
+                    history_df, history_visible_columns = prepare_table_view(
+                        history_df,
+                        "autoresearch_history",
+                        default_search_columns=list(history_df.columns[: min(4, len(history_df.columns))]),
+                        filter_title="AutoResearch 迭代历史",
+                    )
+                    render_standard_data_editor(
+                        history_df[history_visible_columns],
+                        "autoresearch_history",
+                        max_height=320,
+                    )
 
                 st.markdown("---")
 
                 # ── 优化后 Skills 下载 ────────────────────────
                 st.markdown("### 📋 优化后 Skills")
                 opt_skills = skills_engine.extract_skills(
-                    result["result_df"],
+                    cached_enrich_anomaly_with_ai(result["result_df"], knowledge_refresh_token),
                     expert_labels,
                     sigma_multiplier=result["best_sigma"],
                     expert_weight=result["best_weight"],
                 )
 
                 # ★ 闭环：自动将优化后 Skills 保存到本地，供下次检测使用
-                _saved_path = processor.save_skills(
+                _saved_path = processor.service.save_skills_snapshot(
                     opt_skills,
                     sigma=result["best_sigma"],
                     weight=result["best_weight"],
                 )
                 st.cache_data.clear()
                 st.success(f"✅ Skills 已自动保存至 `{_saved_path}`，下次异常检测将自动加载。")
+
+                sync_result = sync_ai_knowledge_base(
+                    force_full=False,
+                    spinner_text="🤖 正在蒸馏专家备注并更新 AI 知识库...",
+                )
+                if sync_result.get("status") == "success":
+                    st.success(f"🤖 {sync_result.get('message', '')}")
+                elif sync_result.get("status") in {"no_changes", "no_data", "skipped"}:
+                    st.info(f"🤖 {sync_result.get('message', '')}")
+                else:
+                    st.warning(f"🤖 {sync_result.get('message', '')}")
 
                 opt_json = skills_engine.skills_to_json_bytes(opt_skills)
                 st.download_button(
@@ -1314,12 +1974,25 @@ elif page == "Skills 技能引擎":
                     "全量备件对照：原始结论 vs 专家反馈 vs 最终优化结论"
                 )
                 audit_df = skills_engine.generate_audit_report(
-                    anomaly_df, result["result_df"], expert_labels
+                    anomaly_df, cached_enrich_anomaly_with_ai(result["result_df"], knowledge_refresh_token), expert_labels
                 )
-                st.dataframe(audit_df, use_container_width=True, height=420, hide_index=True)
+                audit_df, audit_visible_columns = prepare_table_view(
+                    audit_df,
+                    "audit_report_table",
+                    default_search_columns=["物料编码", "物料名称", "备件简称", "AI辅助分析"],
+                    filter_title="深度审计报表",
+                )
+                render_standard_data_editor(
+                    audit_df[audit_visible_columns],
+                    "audit_report_table",
+                    column_config={
+                        "AI辅助分析": st.column_config.TextColumn("AI辅助分析", disabled=True, width="large"),
+                    },
+                    max_height=460,
+                )
 
                 try:
-                    audit_bytes = processor.to_excel_bytes(audit_df)
+                    audit_bytes = processor.to_excel_bytes(audit_df[audit_visible_columns])
                     st.download_button(
                         "📥 导出深度审计报表",
                         data=audit_bytes,
@@ -1457,7 +2130,7 @@ elif page == "车系-备件成本区间对照":
                     marker=dict(color=clr, line_width=0),
                     showlegend=False,
                     hovertemplate=(
-                        f"<b>{processor.escape_html_text(lbl)}</b><br>"
+                        f"<b>{ui_utils.escape_html_text(lbl)}</b><br>"
                         f"合理下限: {lo:,.2f}<br>"
                         f"合理上限: {hi:,.2f}<br>"
                         f"基准价: {mid:,.2f}<extra></extra>"

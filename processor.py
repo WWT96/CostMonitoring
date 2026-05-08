@@ -1,9 +1,9 @@
 import glob
-import html
 import io
 import json as _json
 import os
 import re
+from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -11,7 +11,6 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 from sqlalchemy import (
     Column,
     DateTime,
@@ -27,12 +26,14 @@ from sqlalchemy import (
     delete,
     func,
     inspect,
+    Index,
     select,
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from config import settings
 
@@ -116,7 +117,20 @@ EXPERT_FEEDBACK_TABLE = Table(
     DB_METADATA,
     Column("record_key", String(160), primary_key=True),
     Column("label", String(32), nullable=False),
+    Column("remark", Text),
     Column("labeled_at", DateTime, nullable=False),
+)
+
+EXPERT_KNOWLEDGE_BASE_TABLE = Table(
+    "expert_knowledge_base",
+    DB_METADATA,
+    Column("rule_id", String(64), primary_key=True),
+    Column("short_name", String(128), nullable=False),
+    Column("supplier_code", String(64)),
+    Column("vehicle_series", String(255)),
+    Column("rule_content", Text, nullable=False),
+    Column("confidence_score", Float),
+    Column("updated_at", DateTime, nullable=False),
 )
 
 CORE_COST_RECORDS_TABLE = Table(
@@ -136,6 +150,14 @@ CORE_COST_RECORDS_TABLE = Table(
     Column("assy_supplier_code", String(64)),
     Column("assy_cost", Float),
     Column("created_at", DateTime, nullable=False),
+)
+
+Index(
+    "ux_core_cost_records_business_key",
+    CORE_COST_RECORDS_TABLE.c.material_code,
+    CORE_COST_RECORDS_TABLE.c.factory,
+    CORE_COST_RECORDS_TABLE.c.monitor_date,
+    unique=True,
 )
 
 COST_ANOMALY_RESULTS_TABLE = Table(
@@ -186,6 +208,7 @@ SKILLS_ITEMS_TABLE = Table(
     Column("lower_bound", Float),
     Column("upper_bound", Float),
     Column("base_price", Float),
+    Column("skill_payload_json", Text),
 )
 
 _CORE_RECORD_EXPORT_COLUMNS = [
@@ -201,6 +224,13 @@ _CORE_RECORD_EXPORT_COLUMNS = [
     "assy_supplier_name",
     "assy_supplier_code",
     "assy_cost",
+]
+
+_CORE_COST_RECORDS_BUSINESS_KEY_COLUMNS = ["material_code", "factory", "monitor_date"]
+_CORE_COST_RECORDS_UPSERT_UPDATE_COLUMNS = [
+    column_name
+    for column_name in [*_CORE_RECORD_EXPORT_COLUMNS, "created_at"]
+    if column_name not in _CORE_COST_RECORDS_BUSINESS_KEY_COLUMNS
 ]
 
 _ANOMALY_EXPORT_COLUMNS = [
@@ -401,38 +431,117 @@ def _upsert_rows(
     rows: Sequence[Dict[str, Any]],
     conflict_columns: Sequence[str],
     update_columns: Sequence[str],
+    session: Optional[Session] = None,
 ) -> None:
     if not rows:
         return
 
-    engine = require_db_engine()
-    with engine.begin() as conn:
-        for batch in _chunk_rows(rows):
-            conn.execute(
-                _build_upsert_statement(
-                    conn,
+    if session is None:
+        with Session(require_db_engine()) as managed_session:
+            with managed_session.begin():
+                _upsert_rows(
                     table,
-                    batch,
+                    rows,
                     conflict_columns=conflict_columns,
                     update_columns=update_columns,
+                    session=managed_session,
                 )
+        return
+
+    conn = session.connection()
+    for batch in _chunk_rows(rows):
+        session.execute(
+            _build_upsert_statement(
+                conn,
+                table,
+                batch,
+                conflict_columns=conflict_columns,
+                update_columns=update_columns,
             )
+        )
 
 
-def _insert_rows(table: Table, rows: Sequence[Dict[str, Any]]) -> None:
+def _insert_rows(table: Table, rows: Sequence[Dict[str, Any]], session: Optional[Session] = None) -> None:
     if not rows:
         return
 
-    engine = require_db_engine()
-    with engine.begin() as conn:
-        for batch in _chunk_rows(rows):
-            conn.execute(table.insert(), list(batch))
+    if session is None:
+        with Session(require_db_engine()) as managed_session:
+            with managed_session.begin():
+                _insert_rows(table, rows, session=managed_session)
+        return
+
+    for batch in _chunk_rows(rows):
+        session.execute(table.insert(), list(batch))
 
 
 def _count_table_rows(table: Table) -> int:
     engine = require_db_engine()
     with engine.connect() as conn:
         return int(conn.execute(select(func.count()).select_from(table)).scalar_one())
+
+
+def _core_cost_records_has_business_key_index(engine: Engine) -> bool:
+    inspector = inspect(engine)
+    expected_columns = set(_CORE_COST_RECORDS_BUSINESS_KEY_COLUMNS)
+
+    for index_meta in inspector.get_indexes(CORE_COST_RECORDS_TABLE.name):
+        column_names = set(index_meta.get("column_names") or [])
+        if index_meta.get("unique") and column_names == expected_columns:
+            return True
+
+    for constraint_meta in inspector.get_unique_constraints(CORE_COST_RECORDS_TABLE.name):
+        column_names = set(constraint_meta.get("column_names") or [])
+        if column_names == expected_columns:
+            return True
+
+    return False
+
+
+def _dedupe_core_cost_records_table(session: Session) -> None:
+    rows_df = pd.read_sql(
+        select(
+            CORE_COST_RECORDS_TABLE.c.cost_record_id,
+            CORE_COST_RECORDS_TABLE.c.material_code,
+            CORE_COST_RECORDS_TABLE.c.factory,
+            CORE_COST_RECORDS_TABLE.c.monitor_date,
+            CORE_COST_RECORDS_TABLE.c.created_at,
+        ).order_by(
+            CORE_COST_RECORDS_TABLE.c.created_at.desc(),
+            CORE_COST_RECORDS_TABLE.c.cost_record_id.desc(),
+        ),
+        session.connection(),
+    )
+    if rows_df.empty:
+        return
+
+    duplicate_ids = rows_df[
+        rows_df.duplicated(subset=_CORE_COST_RECORDS_BUSINESS_KEY_COLUMNS, keep="first")
+    ]["cost_record_id"].tolist()
+    if duplicate_ids:
+        session.execute(
+            delete(CORE_COST_RECORDS_TABLE).where(
+                CORE_COST_RECORDS_TABLE.c.cost_record_id.in_(duplicate_ids)
+            )
+        )
+
+
+def _ensure_core_cost_records_business_key_index() -> None:
+    engine = require_db_engine()
+    CORE_COST_RECORDS_TABLE.create(engine, checkfirst=True)
+
+    if _core_cost_records_has_business_key_index(engine):
+        return
+
+    with Session(engine) as session:
+        with session.begin():
+            _dedupe_core_cost_records_table(session)
+            session.execute(
+                text(
+                    'CREATE UNIQUE INDEX IF NOT EXISTS "ux_core_cost_records_business_key" '
+                    'ON "core_cost_records" (material_code, factory, monitor_date)'
+                )
+            )
 
 
 def extract_date(val):
@@ -457,12 +566,6 @@ def detect_price_column(columns: Iterable[str]) -> Optional[str]:
         if "价格" in str(col) or "成本" in str(col):
             return col
     return None
-
-
-def escape_html_text(value) -> str:
-    if pd.isna(value):
-        return ""
-    return html.escape(str(value), quote=True)
 
 
 def parse_vehicle_rank_config(text: str) -> List[str]:
@@ -613,7 +716,7 @@ def _prepare_core_cost_records(
     )
     prepared = prepared.dropna(subset=["material_code", "factory", "monitor_date", "cost_amount"])
     prepared = prepared.drop_duplicates(
-        subset=["material_code", "factory", "monitor_date", "cost_amount"],
+        subset=_CORE_COST_RECORDS_BUSINESS_KEY_COLUMNS,
         keep="last",
     ).reset_index(drop=True)
     return prepared, resolved_price_col
@@ -627,13 +730,24 @@ def persist_core_cost_records(
     prepared, _ = _prepare_core_cost_records(df, price_col)
     rows = _rows_from_dataframe(prepared)
     engine = require_db_engine()
+    _ensure_core_cost_records_business_key_index()
 
     if mode not in {"full", "incremental"}:
         raise ValueError(f"不支持的持久化模式: {mode}")
 
-    with engine.begin() as conn:
-        conn.execute(delete(CORE_COST_RECORDS_TABLE))
-    _insert_rows(CORE_COST_RECORDS_TABLE, rows)
+    with Session(engine) as session:
+        with session.begin():
+            if mode == "full":
+                session.execute(delete(CORE_COST_RECORDS_TABLE))
+                _insert_rows(CORE_COST_RECORDS_TABLE, rows, session=session)
+            else:
+                _upsert_rows(
+                    CORE_COST_RECORDS_TABLE,
+                    rows,
+                    conflict_columns=_CORE_COST_RECORDS_BUSINESS_KEY_COLUMNS,
+                    update_columns=_CORE_COST_RECORDS_UPSERT_UPDATE_COLUMNS,
+                    session=session,
+                )
     return len(rows)
 
 
@@ -672,6 +786,18 @@ def get_core_cost_records_refresh_token() -> float:
     if latest is None:
         return 0.0
     return pd.Timestamp(latest).timestamp()
+
+
+def get_core_cost_records_status() -> Dict[str, Any]:
+    engine = require_db_engine()
+    with engine.connect() as conn:
+        row_count = int(conn.execute(select(func.count()).select_from(CORE_COST_RECORDS_TABLE)).scalar_one())
+        latest = conn.execute(select(func.max(CORE_COST_RECORDS_TABLE.c.created_at))).scalar_one_or_none()
+    return {
+        "row_count": row_count,
+        "updated_at": pd.Timestamp(latest).to_pydatetime() if latest is not None else None,
+        "price_col": "成本" if row_count > 0 else None,
+    }
 
 
 def _prepare_anomaly_results(result_df: pd.DataFrame, result_mode: str) -> pd.DataFrame:
@@ -1032,75 +1158,6 @@ def paginate_by_material(df: pd.DataFrame, page_number: int, page_size: int = 50
     }
 
 
-def render_merged_html_table(df: pd.DataFrame, value_cols: List[str], is_trend_mode: bool = False) -> str:
-    if df.empty:
-        return "<div style='text-align:center; padding: 20px;'>暂无数据</div>"
-
-    all_cols = BASE_COLS + value_cols
-    html_parts = [
-        """
-        <div style="width: 100%; overflow-x: auto; margin-bottom: 20px;">
-            <table style="width: 100%; border-collapse: collapse; font-family: 'Segoe UI', sans-serif; font-size: 14px; border: 1px solid #dee2e6;">
-                <thead>
-                    <tr style="background-color: #f8f9fa; color: #495057;">
-        """
-    ]
-
-    for col in all_cols:
-        html_parts.append(
-            f'<th style="padding: 12px; border: 1px solid #dee2e6; text-align: center !important; vertical-align: middle !important; font-weight: 600; white-space: nowrap;">{escape_html_text(col)}</th>'
-        )
-
-    html_parts.append("</tr></thead><tbody>")
-
-    grouped = df.sort_values(["物料编码", "工厂"]).groupby("物料编码", sort=False)
-    for _, group in grouped:
-        row_count = len(group)
-        first_row = True
-        for _, row in group.iterrows():
-            html_parts.append(
-                '<tr style="background-color: #ffffff; transition: background-color 0.1s ease;" onmouseover="this.style.backgroundColor=\'#f1f3f5\'" onmouseout="this.style.backgroundColor=\'#ffffff\'">'
-            )
-            for col_idx, col_name in enumerate(all_cols):
-                val = row.get(col_name, "")
-                if col_idx < 4:
-                    if first_row:
-                        val_text = escape_html_text(val)
-                        html_parts.append(
-                            f'<td rowspan="{row_count}" style="padding: 10px; border: 1px solid #dee2e6; text-align: center !important; vertical-align: middle !important; background-color: #fff;">{val_text}</td>'
-                        )
-                    continue
-
-                cell_style = (
-                    "padding: 8px; border: 1px solid #dee2e6; text-align: center !important; vertical-align: middle !important;"
-                )
-                display_val = ""
-
-                if pd.isna(val) or val == "":
-                    display_val = ""
-                elif isinstance(val, (int, float)):
-                    display_val = f"{val:,.2f}"
-                    if is_trend_mode and col_name in value_cols:
-                        if val > 0:
-                            cell_style += " color: #e74c3c; font-weight: bold;"
-                            display_val = f"▲ {display_val}"
-                        elif val < 0:
-                            cell_style += " color: #27ae60; font-weight: bold;"
-                            display_val = f"▼ {display_val}"
-                        else:
-                            cell_style += " color: #2c3e50;"
-                            display_val = "-"
-                else:
-                    display_val = str(val)
-
-                html_parts.append(f'<td style="{cell_style}">{escape_html_text(display_val)}</td>')
-            html_parts.append("</tr>")
-            first_row = False
-
-    html_parts.append("</tbody></table></div>")
-    return "".join(html_parts)
-
-
 def get_vehicle_gradient_comparison(
     df: pd.DataFrame, price_col: str, part_name: str, vehicle_rank: List[str]
 ) -> pd.DataFrame:
@@ -1128,45 +1185,6 @@ def get_vehicle_gradient_comparison(
     output.columns = ["梯度排名", "适用车系", "备件简称", "最新成本", "最新成本有效期"]
     output["最新成本有效期"] = pd.to_datetime(output["最新成本有效期"]).dt.strftime("%Y-%m-%d")
     return output
-
-
-def render_center_table_html(df: pd.DataFrame) -> str:
-    if df.empty:
-        return "<div style='text-align:center; padding: 20px;'>暂无数据</div>"
-
-    html = [
-        """
-        <div style="width: 100%; overflow-x: auto; margin-bottom: 20px;">
-            <table style="width: 100%; border-collapse: collapse; font-family: 'Segoe UI', sans-serif; font-size: 14px; border: 1px solid #dee2e6;">
-                <thead>
-                    <tr style="background-color: #f8f9fa; color: #495057;">
-        """
-    ]
-    for col in df.columns:
-        html.append(
-            f'<th style="padding: 12px; border: 1px solid #dee2e6; text-align: center !important; font-weight: 600;">{escape_html_text(col)}</th>'
-        )
-    html.append("</tr></thead><tbody>")
-
-    for _, row in df.iterrows():
-        html.append(
-            '<tr style="background-color: #ffffff; transition: background-color 0.1s ease;" onmouseover="this.style.backgroundColor=\'#f1f3f5\'" onmouseout="this.style.backgroundColor=\'#ffffff\'">'
-        )
-        for col in df.columns:
-            val = row[col]
-            if pd.isna(val):
-                show_val = ""
-            elif col == "最新成本" and isinstance(val, (int, float)):
-                show_val = f"{val:,.2f}"
-            else:
-                show_val = str(val)
-            html.append(
-                f'<td style="padding: 10px; border: 1px solid #dee2e6; text-align: center !important;">{escape_html_text(show_val)}</td>'
-            )
-        html.append("</tr>")
-
-    html.append("</tbody></table></div>")
-    return "".join(html)
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -1327,28 +1345,98 @@ def make_record_key(row) -> str:
     return f"{code}_{factory}_{date_str}_{cost}"
 
 
+def split_record_key(record_key: Any) -> Dict[str, Any]:
+    text_key = str(record_key or "").strip()
+    parts = text_key.split("_", 3)
+    while len(parts) < 4:
+        parts.append("")
+
+    material_code, factory, monitor_date_text, price_text = [part.strip() for part in parts[:4]]
+    monitor_date = pd.to_datetime(monitor_date_text, errors="coerce")
+    price_value = pd.to_numeric(pd.Series([price_text]), errors="coerce").iloc[0]
+
+    return {
+        "record_key": text_key,
+        "物料编码": material_code,
+        "工厂": factory,
+        "价格有效期于": monitor_date.strftime("%Y-%m-%d") if pd.notna(monitor_date) else monitor_date_text,
+        "价格": float(price_value) if pd.notna(price_value) else np.nan,
+        "_join_date_key": monitor_date.strftime("%Y-%m-%d") if pd.notna(monitor_date) else monitor_date_text,
+        "_join_price_key": f"{float(price_value):.4f}" if pd.notna(price_value) else price_text,
+    }
+
+
 class LabelManager:
     """管理用户对异常检测结果的手动标注，持久化到 expert_feedback 表。"""
 
-    _COLUMNS = ["record_key", "label", "labeled_at"]
+    _COLUMNS = ["record_key", "label", "remark", "labeled_at"]
 
     def __init__(self, table_name: str = "expert_feedback"):
         self._table_name = table_name
 
     # --- 读取 ---
 
-    def get_labels(self) -> Dict[str, str]:
-        """返回 ``{record_key: label}`` 字典。数据库未就绪时返回空字典。"""
+    def get_labels(self) -> Dict[str, Dict[str, str]]:
+        """返回 ``{record_key: {label, remark}}`` 字典。数据库未就绪时返回空字典。"""
         if DB_ENGINE is None:
             return {}
         try:
-            query = select(EXPERT_FEEDBACK_TABLE.c.record_key, EXPERT_FEEDBACK_TABLE.c.label)
+            query = select(
+                EXPERT_FEEDBACK_TABLE.c.record_key,
+                EXPERT_FEEDBACK_TABLE.c.label,
+                EXPERT_FEEDBACK_TABLE.c.remark,
+            )
             df = pd.read_sql(query, require_db_engine())
             if df.empty:
                 return {}
-            return dict(zip(df["record_key"].astype(str), df["label"].astype(str)))
+            df["record_key"] = df["record_key"].astype(str)
+            df["label"] = df["label"].astype(str)
+            df["remark"] = df["remark"].fillna("").astype(str)
+            return {
+                row["record_key"]: {
+                    "label": row["label"],
+                    "remark": row["remark"],
+                }
+                for row in df.to_dict(orient="records")
+            }
         except Exception:
             return {}
+
+    def get_label_statuses(self) -> Dict[str, str]:
+        """返回 ``{record_key: label}`` 字典，供算法和筛选逻辑使用。"""
+        return {
+            record_key: payload.get("label", "")
+            for record_key, payload in self.get_labels().items()
+        }
+
+    def get_label_remarks(self) -> Dict[str, str]:
+        """返回 ``{record_key: remark}`` 字典，供界面展示与导出使用。"""
+        return {
+            record_key: payload.get("remark", "")
+            for record_key, payload in self.get_labels().items()
+        }
+
+    def get_label_records(self) -> pd.DataFrame:
+        """返回包含 record_key / label / remark / labeled_at 的明细表。"""
+        if DB_ENGINE is None:
+            return pd.DataFrame(columns=["record_key", "label", "remark", "labeled_at"])
+        try:
+            query = select(
+                EXPERT_FEEDBACK_TABLE.c.record_key,
+                EXPERT_FEEDBACK_TABLE.c.label,
+                EXPERT_FEEDBACK_TABLE.c.remark,
+                EXPERT_FEEDBACK_TABLE.c.labeled_at,
+            )
+            df = pd.read_sql(query, require_db_engine())
+            if df.empty:
+                return pd.DataFrame(columns=["record_key", "label", "remark", "labeled_at"])
+            df["record_key"] = df["record_key"].astype(str)
+            df["label"] = df["label"].astype(str)
+            df["remark"] = df["remark"].fillna("").astype(str)
+            df["labeled_at"] = pd.to_datetime(df["labeled_at"], errors="coerce")
+            return df
+        except Exception:
+            return pd.DataFrame(columns=["record_key", "label", "remark", "labeled_at"])
 
     def count(self) -> int:
         """已标注记录总数。"""
@@ -1361,40 +1449,64 @@ class LabelManager:
 
     # --- 写入 ---
 
-    def save_label(self, key: str, status: str) -> None:
+    def save_label(self, key: str, status: str, remark: str = "") -> None:
         """保存或更新单条标注记录。"""
         now = datetime.now()
         _upsert_rows(
             EXPERT_FEEDBACK_TABLE,
-            [{"record_key": key, "label": status, "labeled_at": now}],
+            [{"record_key": key, "label": status, "remark": str(remark or "").strip(), "labeled_at": now}],
             conflict_columns=["record_key"],
-            update_columns=["label", "labeled_at"],
+            update_columns=["label", "remark", "labeled_at"],
         )
 
-    def save_labels_batch(self, updates: Dict[str, str]) -> None:
+    def save_labels_batch(self, updates: Dict[str, Any]) -> None:
         """批量保存标注记录。"""
         if not updates:
             return
         now = datetime.now()
-        rows = [
-            {"record_key": record_key, "label": label, "labeled_at": now}
-            for record_key, label in updates.items()
-        ]
+        rows = []
+        for record_key, payload in updates.items():
+            if isinstance(payload, dict):
+                label = payload.get("label")
+                remark = payload.get("remark", "")
+            else:
+                label = payload
+                remark = ""
+            if label is None or str(label).strip() == "":
+                continue
+            rows.append(
+                {
+                    "record_key": record_key,
+                    "label": str(label).strip(),
+                    "remark": str(remark or "").strip(),
+                    "labeled_at": now,
+                }
+            )
         _upsert_rows(
             EXPERT_FEEDBACK_TABLE,
             rows,
             conflict_columns=["record_key"],
-            update_columns=["label", "labeled_at"],
+            update_columns=["label", "remark", "labeled_at"],
         )
 
-    def _flush(self, final_labels_df: pd.DataFrame) -> None:
+    def replace_all(self, final_labels_df: pd.DataFrame) -> None:
         """以当前最终标注集为准，同步数据库中的 expert_feedback 记录。"""
         if isinstance(final_labels_df, dict):
-            final_df = pd.DataFrame(
-                [{"record_key": key, "label": label} for key, label in final_labels_df.items()]
-            )
+            rows = []
+            for key, payload in final_labels_df.items():
+                if isinstance(payload, dict):
+                    rows.append(
+                        {
+                            "record_key": key,
+                            "label": payload.get("label"),
+                            "remark": payload.get("remark", ""),
+                        }
+                    )
+                else:
+                    rows.append({"record_key": key, "label": payload, "remark": ""})
+            final_df = pd.DataFrame(rows)
         elif final_labels_df is None:
-            final_df = pd.DataFrame(columns=["record_key", "label"])
+            final_df = pd.DataFrame(columns=["record_key", "label", "remark"])
         else:
             final_df = final_labels_df.copy()
 
@@ -1403,6 +1515,9 @@ class LabelManager:
                 "_record_key": "record_key",
                 "记录主键": "record_key",
                 "当前标注": "label",
+                "标注备注": "remark",
+                "专家备注": "remark",
+                "备注": "remark",
                 "status": "label",
             }
         )
@@ -1410,10 +1525,13 @@ class LabelManager:
             final_df["record_key"] = pd.Series(dtype="string")
         if "label" not in final_df.columns:
             final_df["label"] = pd.Series(dtype="string")
+        if "remark" not in final_df.columns:
+            final_df["remark"] = pd.Series(dtype="string")
 
-        final_df = final_df[["record_key", "label"]].copy()
+        final_df = final_df[["record_key", "label", "remark"]].copy()
         final_df["record_key"] = final_df["record_key"].astype("string").str.strip()
         final_df["label"] = final_df["label"].astype("string").str.strip()
+        final_df["remark"] = final_df["remark"].fillna("").astype("string").str.strip()
         final_df = final_df.replace({"record_key": {"": pd.NA}, "label": {"": pd.NA}})
         final_df = final_df.dropna(subset=["record_key", "label"])
         final_df = final_df.drop_duplicates(subset=["record_key"], keep="last")
@@ -1422,7 +1540,11 @@ class LabelManager:
         engine = require_db_engine()
         with engine.begin() as conn:
             existing_df = pd.read_sql(
-                select(EXPERT_FEEDBACK_TABLE.c.record_key, EXPERT_FEEDBACK_TABLE.c.label),
+                select(
+                    EXPERT_FEEDBACK_TABLE.c.record_key,
+                    EXPERT_FEEDBACK_TABLE.c.label,
+                    EXPERT_FEEDBACK_TABLE.c.remark,
+                ),
                 conn,
             )
             existing_keys = set(existing_df["record_key"].astype(str)) if not existing_df.empty else set()
@@ -1442,9 +1564,13 @@ class LabelManager:
                         EXPERT_FEEDBACK_TABLE,
                         batch,
                         conflict_columns=["record_key"],
-                        update_columns=["label", "labeled_at"],
+                        update_columns=["label", "remark", "labeled_at"],
                     )
                 )
+
+    def _flush(self, final_labels_df: pd.DataFrame) -> None:
+        """兼容旧调用方；请改用公开的 replace_all。"""
+        self.replace_all(final_labels_df)
 
     def delete_labels(self, keys_to_remove) -> int:
         """删除指定 record_key 的标注，返回实际删除数量。"""
@@ -1468,8 +1594,402 @@ class LabelManager:
 
 
 def get_latest_feedback() -> Dict[str, str]:
-    """单源读取：每次都从 expert_feedback 表获取最新专家标注，不使用缓存。"""
+    """单源读取：每次都从 expert_feedback 表获取最新专家标注状态，不使用缓存。"""
+    return label_manager.get_label_statuses()
+
+
+def get_latest_feedback_details() -> Dict[str, Dict[str, str]]:
+    """单源读取：返回 expert_feedback 中的标注状态与备注。"""
     return label_manager.get_labels()
+
+
+def load_expert_knowledge_base() -> pd.DataFrame:
+    """读取专家经验知识库。"""
+    _ensure_expert_knowledge_base_columns()
+    engine = require_db_engine()
+    query = select(EXPERT_KNOWLEDGE_BASE_TABLE).order_by(EXPERT_KNOWLEDGE_BASE_TABLE.c.updated_at.desc())
+    df = pd.read_sql(query, engine)
+    if df.empty:
+        return df
+    df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce")
+    df["confidence_score"] = pd.to_numeric(df["confidence_score"], errors="coerce")
+    for column_name in ["rule_id", "short_name", "supplier_code", "vehicle_series", "rule_content"]:
+        if column_name in df.columns:
+            df[column_name] = df[column_name].fillna("").astype(str)
+    return df
+
+
+def get_expert_knowledge_last_updated_at() -> Optional[pd.Timestamp]:
+    """返回知识库最后更新时间。"""
+    _ensure_expert_knowledge_base_columns()
+    engine = require_db_engine()
+    with engine.connect() as conn:
+        latest = conn.execute(select(func.max(EXPERT_KNOWLEDGE_BASE_TABLE.c.updated_at))).scalar_one_or_none()
+    if latest is None:
+        return None
+    return pd.Timestamp(latest)
+
+
+def save_expert_knowledge_rules(rules: Sequence[Dict[str, Any]]) -> int:
+    """批量写入专家经验知识库。"""
+    if not rules:
+        return 0
+    _ensure_expert_knowledge_base_columns()
+    rows = _rows_from_dataframe(pd.DataFrame(rules))
+    _upsert_rows(
+        EXPERT_KNOWLEDGE_BASE_TABLE,
+        rows,
+        conflict_columns=["rule_id"],
+        update_columns=[
+            "short_name",
+            "supplier_code",
+            "vehicle_series",
+            "rule_content",
+            "confidence_score",
+            "updated_at",
+        ],
+    )
+    return len(rows)
+
+
+def delete_expert_knowledge_rules(rule_ids: Sequence[str]) -> int:
+    """删除指定 rule_id 的知识库规则。"""
+    keys = [str(rule_id).strip() for rule_id in rule_ids if str(rule_id).strip()]
+    if not keys:
+        return 0
+    _ensure_expert_knowledge_base_columns()
+    with require_db_engine().begin() as conn:
+        result = conn.execute(
+            delete(EXPERT_KNOWLEDGE_BASE_TABLE).where(EXPERT_KNOWLEDGE_BASE_TABLE.c.rule_id.in_(keys))
+        )
+    return int(result.rowcount or 0)
+
+
+def get_expert_knowledge_refresh_token() -> float:
+    """返回知识库刷新令牌，用于缓存失效。"""
+    latest = get_expert_knowledge_last_updated_at()
+    if latest is None:
+        return 0.0
+    return float(pd.Timestamp(latest).timestamp())
+
+
+def _normalize_match_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", "", str(value)).strip().lower()
+
+
+def _normalize_short_name_core(value: Any) -> str:
+    text = _normalize_match_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"(总成件|总成|组件|模块|套件)$", "", text)
+    core = re.sub(r"[前后左右上下内外高中低大小新老轻重]", "", text)
+    return core or text
+
+
+def _common_suffix_length(left: str, right: str) -> int:
+    max_len = min(len(left), len(right))
+    count = 0
+    for idx in range(1, max_len + 1):
+        if left[-idx] != right[-idx]:
+            break
+        count += 1
+    return count
+
+
+def _short_name_similarity(left: Any, right: Any) -> Tuple[float, bool]:
+    left_text = _normalize_match_text(left)
+    right_text = _normalize_match_text(right)
+    if not left_text or not right_text:
+        return 0.0, False
+    if left_text == right_text:
+        return 1.0, True
+
+    left_core = _normalize_short_name_core(left_text)
+    right_core = _normalize_short_name_core(right_text)
+    sequence_ratio = SequenceMatcher(None, left_core, right_core).ratio()
+    overlap = 0.0
+    union_chars = set(left_core) | set(right_core)
+    if union_chars:
+        overlap = len(set(left_core) & set(right_core)) / len(union_chars)
+    suffix_len = _common_suffix_length(left_core, right_core)
+    suffix_ratio = suffix_len / max(len(left_core), len(right_core), 1)
+    same_class = (
+        left_core == right_core
+        or (left_core and left_core in right_core)
+        or (right_core and right_core in left_core)
+        or suffix_len >= 1
+    )
+    return max(sequence_ratio, overlap, suffix_ratio), same_class
+
+
+def _infer_rule_direction(rule_content: Any) -> str:
+    text = str(rule_content or "")
+    if re.search(r"溢价|偏高|偏贵|高价|高性能|升级|模摊|材料更高|工艺更高", text):
+        return "high"
+    if re.search(r"偏低|偏便宜|低价|折价|降配|简配|替代料|返利", text):
+        return "low"
+    return "neutral"
+
+
+def _build_core_context_lookup() -> Dict[str, Dict[str, str]]:
+    core_df, _, _ = load_core_cost_records()
+    if core_df is None or core_df.empty:
+        return {}
+    lookup_df = core_df.copy()
+    lookup_df["价格有效于"] = pd.to_datetime(lookup_df.get("monitor_date"), errors="coerce")
+    lookup_df["实际成本"] = pd.to_numeric(lookup_df.get("成本"), errors="coerce")
+    lookup_df["_record_key"] = lookup_df.apply(make_record_key, axis=1)
+    lookup_df["一级总成供应商代码"] = lookup_df.get("一级总成供应商代码", "").fillna("").astype(str)
+    lookup_df["一级总成供应商名称"] = lookup_df.get("一级总成供应商名称", "").fillna("").astype(str)
+    lookup_df["适用车系"] = lookup_df.get("适用车系", "").fillna("").astype(str)
+    lookup_df["备件简称"] = lookup_df.get("备件简称", "").fillna("").astype(str)
+    lookup_df = lookup_df.drop_duplicates(subset=["_record_key"], keep="last")
+    return {
+        row["_record_key"]: {
+            "supplier_code": row.get("一级总成供应商代码", ""),
+            "supplier_name": row.get("一级总成供应商名称", ""),
+            "vehicle_series": row.get("适用车系", ""),
+            "short_name": row.get("备件简称", ""),
+        }
+        for row in lookup_df.to_dict(orient="records")
+    }
+
+
+def _resolve_anomaly_context(anomaly_record: Any, core_context_lookup: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
+    core_context_lookup = core_context_lookup or {}
+    if hasattr(anomaly_record, "to_dict"):
+        data = anomaly_record.to_dict()
+    else:
+        data = dict(anomaly_record)
+
+    record_key = str(data.get("_record_key") or "")
+    fallback = core_context_lookup.get(record_key, {})
+    actual_price = pd.to_numeric(pd.Series([data.get("实际成本")]), errors="coerce").iloc[0]
+    baseline_price = pd.to_numeric(pd.Series([data.get("预测值")]), errors="coerce").iloc[0]
+    deviation_ratio = pd.to_numeric(pd.Series([data.get("偏离比例")]), errors="coerce").iloc[0]
+    if pd.isna(deviation_ratio) and pd.notna(actual_price) and pd.notna(baseline_price) and float(baseline_price) != 0.0:
+        deviation_ratio = (float(actual_price) - float(baseline_price)) / float(baseline_price)
+
+    return {
+        "record_key": record_key,
+        "status": str(data.get("status") or ""),
+        "short_name": str(data.get("备件简称") or fallback.get("short_name") or "").strip(),
+        "vehicle_series": str(data.get("适用车系") or fallback.get("vehicle_series") or "").strip(),
+        "supplier_code": str(
+            data.get("供应商代码")
+            or data.get("一级总成供应商代码")
+            or fallback.get("supplier_code")
+            or ""
+        ).strip(),
+        "supplier_name": str(
+            data.get("供应商名称")
+            or data.get("一级总成供应商名称")
+            or fallback.get("supplier_name")
+            or ""
+        ).strip(),
+        "actual_price": None if pd.isna(actual_price) else float(actual_price),
+        "baseline_price": None if pd.isna(baseline_price) else float(baseline_price),
+        "deviation_ratio": None if pd.isna(deviation_ratio) else float(deviation_ratio),
+    }
+
+
+def _score_knowledge_rule_match(context: Dict[str, Any], rule_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    short_name_score, same_class = _short_name_similarity(context.get("short_name"), rule_row.get("short_name"))
+    if short_name_score <= 0:
+        return None
+
+    context_supplier = _normalize_match_text(context.get("supplier_code"))
+    context_vehicle = _normalize_match_text(context.get("vehicle_series"))
+    rule_supplier = _normalize_match_text(rule_row.get("supplier_code"))
+    rule_vehicle = _normalize_match_text(rule_row.get("vehicle_series"))
+    rule_confidence = float(pd.to_numeric(pd.Series([rule_row.get("confidence_score")]), errors="coerce").fillna(0.0).iloc[0])
+    direction_penalty = 1.0
+    rule_direction = _infer_rule_direction(rule_row.get("rule_content"))
+    status_text = str(context.get("status") or "")
+    if "偏高" in status_text and rule_direction == "low":
+        direction_penalty = 0.35
+    elif "偏低" in status_text and rule_direction == "high":
+        direction_penalty = 0.35
+
+    match_type = ""
+    base_score = 0.0
+    if context_supplier and rule_supplier and context_supplier == rule_supplier:
+        if short_name_score >= 0.999:
+            match_type = "供应商精准匹配"
+            base_score = 1.0
+        elif same_class and short_name_score >= 0.34:
+            match_type = "同供应商同类继承"
+            base_score = 0.86
+    elif context_vehicle and rule_vehicle and context_vehicle == rule_vehicle:
+        if short_name_score >= 0.999:
+            match_type = "车系精准匹配"
+            base_score = 0.82
+        elif same_class and short_name_score >= 0.34:
+            match_type = "同车系同类继承"
+            base_score = 0.72
+
+    if not match_type:
+        return None
+
+    total_score = (base_score + short_name_score * 0.08 + rule_confidence * 0.06) * direction_penalty
+    return {
+        "match_type": match_type,
+        "score": total_score,
+        "short_name_score": short_name_score,
+        "rule_confidence": rule_confidence,
+        "rule_id": str(rule_row.get("rule_id") or ""),
+        "rule_short_name": str(rule_row.get("short_name") or ""),
+        "rule_content": str(rule_row.get("rule_content") or ""),
+        "supplier_code": str(rule_row.get("supplier_code") or ""),
+        "vehicle_series": str(rule_row.get("vehicle_series") or ""),
+    }
+
+
+def _format_inferred_reason(context: Dict[str, Any], match_detail: Dict[str, Any]) -> str:
+    deviation_ratio = context.get("deviation_ratio")
+    if deviation_ratio is None:
+        deviation_text = ""
+    elif deviation_ratio >= 0:
+        deviation_text = f"当前价格较基准高 {abs(float(deviation_ratio)):.1%}，"
+    else:
+        deviation_text = f"当前价格较基准低 {abs(float(deviation_ratio)):.1%}，"
+
+    if match_detail["match_type"] == "供应商精准匹配":
+        prefix = "命中同供应商历史规律"
+    elif match_detail["match_type"] == "车系精准匹配":
+        prefix = "命中同车系历史规律"
+    elif match_detail["match_type"] == "同供应商同类继承":
+        prefix = f"命中同供应商同类备件经验（{match_detail['rule_short_name']} → {context.get('short_name', '')}）"
+    else:
+        prefix = f"命中同车系同类备件经验（{match_detail['rule_short_name']} → {context.get('short_name', '')}）"
+
+    guidance = "建议优先核查该规律是否仍然成立。"
+    if "同类" in match_detail["match_type"]:
+        guidance = "建议优先核查是否延续了同类备件中的材料、工艺或模摊原因。"
+
+    return f"[系统预测] {deviation_text}{prefix}：{match_detail['rule_content']} {guidance}".strip()
+
+
+def infer_anomaly_reason(
+    anomaly_record: Any,
+    knowledge_df: Optional[pd.DataFrame] = None,
+    core_context_lookup: Optional[Dict[str, Dict[str, str]]] = None,
+) -> str:
+    """根据专家经验知识库推理当前异常记录的可能原因。"""
+    detail = _infer_anomaly_reason_detail(
+        anomaly_record,
+        knowledge_df=knowledge_df,
+        core_context_lookup=core_context_lookup,
+    )
+    return detail.get("analysis", "")
+
+
+def _infer_anomaly_reason_detail(
+    anomaly_record: Any,
+    knowledge_df: Optional[pd.DataFrame] = None,
+    core_context_lookup: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    empty_result = {
+        "analysis": "",
+        "rule_id": "",
+        "match_type": "",
+        "rule_content": "",
+        "rule_short_name": "",
+        "confidence_score": None,
+    }
+    if knowledge_df is None:
+        knowledge_df = load_expert_knowledge_base()
+    if knowledge_df is None or knowledge_df.empty:
+        return empty_result
+
+    context = _resolve_anomaly_context(anomaly_record, core_context_lookup=core_context_lookup)
+    if not context.get("short_name"):
+        return empty_result
+    status_text = str(context.get("status") or "")
+    if not re.search(r"异常偏高|异常偏低|严重异常偏低", status_text):
+        return empty_result
+
+    candidates: List[Dict[str, Any]] = []
+    for rule_row in knowledge_df.to_dict(orient="records"):
+        scored = _score_knowledge_rule_match(context, rule_row)
+        if scored:
+            candidates.append(scored)
+    if not candidates:
+        return empty_result
+
+    best = max(candidates, key=lambda item: (item["score"], item["rule_confidence"]))
+    if best["score"] < 0.72:
+        return empty_result
+    return {
+        "analysis": _format_inferred_reason(context, best),
+        "rule_id": best["rule_id"],
+        "match_type": best["match_type"],
+        "rule_content": best["rule_content"],
+        "rule_short_name": best["rule_short_name"],
+        "confidence_score": best["rule_confidence"],
+    }
+
+
+def enrich_anomaly_with_inferred_reasons(result_df: pd.DataFrame) -> pd.DataFrame:
+    """为异常结果附加 AI 辅助分析与推理元数据。"""
+    if result_df is None or result_df.empty:
+        enriched = pd.DataFrame() if result_df is None else result_df.copy()
+    else:
+        enriched = result_df.copy()
+
+    public_column = "AI 辅助分析"
+    internal_columns = ["_ai_rule_id", "_ai_match_scope", "_ai_rule_short_name", "_ai_reference_content", "_ai_confidence_score"]
+    if enriched.empty:
+        for column_name in [public_column] + internal_columns:
+            enriched[column_name] = pd.Series(dtype="string")
+        return enriched
+
+    knowledge_df = load_expert_knowledge_base()
+    if knowledge_df.empty:
+        enriched[public_column] = ""
+        for column_name in internal_columns:
+            enriched[column_name] = ""
+        return enriched
+
+    core_lookup = _build_core_context_lookup()
+    analyses: List[str] = []
+    rule_ids: List[str] = []
+    match_scopes: List[str] = []
+    rule_short_names: List[str] = []
+    rule_contents: List[str] = []
+    confidence_scores: List[Any] = []
+    for _, row in enriched.iterrows():
+        status_text = str(row.get("status") or "")
+        if not re.search(r"异常偏高|异常偏低|严重异常偏低", status_text):
+            detail = {
+                "analysis": "",
+                "rule_id": "",
+                "match_type": "",
+                "rule_content": "",
+                "rule_short_name": "",
+                "confidence_score": None,
+            }
+        else:
+            detail = _infer_anomaly_reason_detail(row, knowledge_df=knowledge_df, core_context_lookup=core_lookup)
+        analyses.append(detail.get("analysis", ""))
+        rule_ids.append(detail.get("rule_id", ""))
+        match_scopes.append(detail.get("match_type", ""))
+        rule_short_names.append(detail.get("rule_short_name", ""))
+        rule_contents.append(detail.get("rule_content", ""))
+        confidence_scores.append(detail.get("confidence_score"))
+
+    enriched[public_column] = analyses
+    enriched["_ai_rule_id"] = rule_ids
+    enriched["_ai_match_scope"] = match_scopes
+    enriched["_ai_rule_short_name"] = rule_short_names
+    enriched["_ai_reference_content"] = rule_contents
+    enriched["_ai_confidence_score"] = confidence_scores
+    enriched[public_column] = enriched[public_column].fillna("")
+    for column_name in ["_ai_rule_id", "_ai_match_scope", "_ai_rule_short_name", "_ai_reference_content"]:
+        enriched[column_name] = enriched[column_name].fillna("")
+    return enriched
 
 
 def _reanchor_cluster_price(
@@ -1489,7 +2009,57 @@ def _reanchor_cluster_price(
 label_manager = LabelManager()
 
 
-@st.cache_data
+class CostMonitoringService:
+    """前端与接口层使用的统一服务边界。"""
+
+    def initialize_storage(self) -> None:
+        initialize_supabase_storage()
+
+    def sync_core_cost_records(
+        self,
+        df: pd.DataFrame,
+        price_col: Optional[str] = None,
+        mode: str = "incremental",
+    ) -> int:
+        return persist_core_cost_records(df, price_col=price_col, mode=mode)
+
+    def load_core_cost_records(self) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[str]]:
+        return load_core_cost_records()
+
+    def get_core_cost_records_status(self) -> Dict[str, Any]:
+        return get_core_cost_records_status()
+
+    def get_feedback_details(self) -> Dict[str, Dict[str, str]]:
+        return label_manager.get_labels()
+
+    def get_feedback_statuses(self) -> Dict[str, str]:
+        return label_manager.get_label_statuses()
+
+    def replace_feedback(self, final_labels_df: pd.DataFrame) -> None:
+        label_manager.replace_all(final_labels_df)
+
+    def delete_feedback(self, keys_to_remove) -> int:
+        return label_manager.delete_labels(keys_to_remove)
+
+    def clear_feedback(self) -> None:
+        label_manager.clear_all()
+
+    def get_feedback_row_count(self) -> int:
+        return label_manager.file_row_count()
+
+    def load_skills_snapshot(self) -> Optional[Dict]:
+        return load_skills()
+
+    def save_skills_snapshot(self, skills: list, sigma: float = 1.0, weight: int = 80) -> str:
+        return save_skills(skills, sigma=sigma, weight=weight)
+
+    def has_skills_snapshot(self) -> bool:
+        return has_skills_snapshot()
+
+
+service = CostMonitoringService()
+
+
 def detect_cost_anomalies(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
     """
     基于密度连接（Density-Linked）的全量历史异常检测。
@@ -1781,18 +2351,15 @@ def save_skills(skills: list, sigma: float = 1.0, weight: int = 80) -> str:
     _ensure_skills_storage_tables()
     snapshot_id = str(uuid4())
     saved_at = datetime.now()
-    _insert_rows(
-        SKILLS_SNAPSHOTS_TABLE,
-        [
-            {
-                "snapshot_id": snapshot_id,
-                "version": "1.0",
-                "saved_at": saved_at,
-                "global_sigma": round(float(sigma), 4),
-                "global_weight": int(weight),
-            }
-        ],
-    )
+    snapshot_rows = [
+        {
+            "snapshot_id": snapshot_id,
+            "version": "1.0",
+            "saved_at": saved_at,
+            "global_sigma": round(float(sigma), 4),
+            "global_weight": int(weight),
+        }
+    ]
 
     rows = []
     for skill in skills:
@@ -1810,9 +2377,14 @@ def save_skills(skills: list, sigma: float = 1.0, weight: int = 80) -> str:
                 "lower_bound": float(bounds.get("合理下限")) if bounds.get("合理下限") is not None else None,
                 "upper_bound": float(bounds.get("合理上限")) if bounds.get("合理上限") is not None else None,
                 "base_price": float(bounds.get("预测值")) if bounds.get("预测值") is not None else None,
+                "skill_payload_json": _json.dumps(skill, ensure_ascii=False, default=str),
             }
         )
-    _insert_rows(SKILLS_ITEMS_TABLE, rows)
+
+    with Session(require_db_engine()) as session:
+        with session.begin():
+            _insert_rows(SKILLS_SNAPSHOTS_TABLE, snapshot_rows, session=session)
+            _insert_rows(SKILLS_ITEMS_TABLE, rows, session=session)
     return "skills_snapshots / skills_items"
 
 
@@ -1842,6 +2414,7 @@ def load_skills() -> Optional[Dict]:
                 SKILLS_ITEMS_TABLE.c.lower_bound,
                 SKILLS_ITEMS_TABLE.c.upper_bound,
                 SKILLS_ITEMS_TABLE.c.base_price,
+                SKILLS_ITEMS_TABLE.c.skill_payload_json,
             )
             .where(SKILLS_ITEMS_TABLE.c.snapshot_id == snapshot["snapshot_id"])
             .order_by(SKILLS_ITEMS_TABLE.c.short_name)
@@ -1849,23 +2422,53 @@ def load_skills() -> Optional[Dict]:
         items_df = pd.read_sql(items_query, engine)
         skills_list = []
         for row in items_df.to_dict(orient="records"):
-            skills_list.append(
-                {
-                    "备件简称": row.get("short_name") or "",
-                    "适用算法": row.get("algorithm_type") or "KDE+KNN+Elbow 密度连接异常检测",
-                    "当前σ参数": row.get("sigma_param") if row.get("sigma_param") is not None else 1.0,
-                    "偏置权重": row.get("expert_weight") if row.get("expert_weight") is not None else 80,
-                    "本组专家标注数": 0,
-                    "经验对齐率": row.get("alignment_rate") if row.get("alignment_rate") is not None else "N/A",
-                    "数据结构分布描述": {},
-                    "成本合理区间边界": {
-                        "预测值": row.get("base_price") if row.get("base_price") is not None else 0.0,
-                        "合理下限": row.get("lower_bound") if row.get("lower_bound") is not None else 0.0,
-                        "合理上限": row.get("upper_bound") if row.get("upper_bound") is not None else 0.0,
-                    },
-                    "异常统计": {},
-                }
-            )
+            payload = {}
+            payload_text = row.get("skill_payload_json")
+            if isinstance(payload_text, str) and payload_text.strip():
+                try:
+                    parsed = _json.loads(payload_text)
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                except Exception:
+                    payload = {}
+
+            skill = dict(payload)
+            skill["备件简称"] = skill.get("备件简称") or row.get("short_name") or ""
+            skill["适用算法"] = skill.get("适用算法") or row.get("algorithm_type") or "KDE+KNN+Elbow 密度连接异常检测"
+            skill["当前σ参数"] = row.get("sigma_param") if row.get("sigma_param") is not None else skill.get("当前σ参数", 1.0)
+            skill["偏置权重"] = row.get("expert_weight") if row.get("expert_weight") is not None else skill.get("偏置权重", 80)
+            skill["本组专家标注数"] = skill.get("本组专家标注数", 0)
+            skill["经验对齐率"] = row.get("alignment_rate") if row.get("alignment_rate") is not None else skill.get("经验对齐率", "N/A")
+            if not isinstance(skill.get("数据结构分布描述"), dict):
+                skill["数据结构分布描述"] = {}
+            if not isinstance(skill.get("异常统计"), dict):
+                skill["异常统计"] = {}
+
+            bounds = skill.get("成本合理区间边界")
+            if not isinstance(bounds, dict):
+                bounds = {}
+            skill["成本合理区间边界"] = {
+                "预测值": row.get("base_price") if row.get("base_price") is not None else bounds.get("预测值", 0.0),
+                "合理下限": row.get("lower_bound") if row.get("lower_bound") is not None else bounds.get("合理下限", 0.0),
+                "合理上限": row.get("upper_bound") if row.get("upper_bound") is not None else bounds.get("合理上限", 0.0),
+            }
+
+            semantic_report = skill.get("语义校准报告")
+            if not isinstance(semantic_report, dict):
+                semantic_report = {}
+            modes = semantic_report.get("主要匹配方式", [])
+            if not isinstance(modes, list):
+                modes = [modes] if modes else []
+            refs = semantic_report.get("参考文本规律", [])
+            if not isinstance(refs, list):
+                refs = [refs] if refs else []
+            skill["语义校准报告"] = {
+                "引用规律数": int(semantic_report.get("引用规律数", len([value for value in refs if str(value).strip()])) or 0),
+                "主要匹配方式": [str(value).strip() for value in modes if str(value).strip()],
+                "参考文本规律": [str(value).strip() for value in refs if str(value).strip()],
+            }
+
+            skills_list.append(skill)
         index = {}
         for sk in skills_list:
             name = sk.get("备件简称")
@@ -1895,7 +2498,84 @@ def has_skills_snapshot() -> bool:
 
 
 def _ensure_database_columns() -> None:
+    _ensure_core_cost_records_business_key_index()
+    _ensure_expert_feedback_columns()
+    _ensure_expert_knowledge_base_columns()
     _ensure_skills_storage_tables()
+
+
+def _ensure_expert_feedback_columns() -> None:
+    engine = require_db_engine()
+    actual_columns = _get_table_columns(engine, EXPERT_FEEDBACK_TABLE.name)
+    if not actual_columns:
+        EXPERT_FEEDBACK_TABLE.create(engine, checkfirst=True)
+        return
+    if "remark" not in actual_columns:
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(text("ALTER TABLE expert_feedback ADD COLUMN IF NOT EXISTS remark TEXT"))
+            else:
+                conn.execute(text("ALTER TABLE expert_feedback ADD COLUMN remark TEXT"))
+
+
+def _ensure_expert_knowledge_base_columns() -> None:
+    engine = require_db_engine()
+    actual_columns = _get_table_columns(engine, EXPERT_KNOWLEDGE_BASE_TABLE.name)
+    if not actual_columns:
+        EXPERT_KNOWLEDGE_BASE_TABLE.create(engine, checkfirst=True)
+        return
+
+    expected_columns = {
+        "rule_id": "VARCHAR(64)",
+        "short_name": "VARCHAR(128)",
+        "supplier_code": "VARCHAR(64)",
+        "vehicle_series": "VARCHAR(255)",
+        "rule_content": "TEXT",
+        "confidence_score": "FLOAT",
+        "updated_at": "TIMESTAMP",
+    }
+    missing_columns = [column_name for column_name in expected_columns if column_name not in actual_columns]
+    if not missing_columns:
+        return
+
+    for column_name in missing_columns:
+        ddl = expected_columns[column_name]
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        f"ALTER TABLE expert_knowledge_base ADD COLUMN IF NOT EXISTS {column_name} {ddl}"
+                    )
+                )
+            else:
+                conn.execute(text(f"ALTER TABLE expert_knowledge_base ADD COLUMN {column_name} {ddl}"))
+
+
+def _ensure_skills_items_columns() -> None:
+    engine = require_db_engine()
+    actual_columns = _get_table_columns(engine, SKILLS_ITEMS_TABLE.name)
+    if not actual_columns:
+        SKILLS_ITEMS_TABLE.create(engine, checkfirst=True)
+        return
+
+    expected_columns = {
+        "skill_payload_json": "TEXT",
+    }
+    missing_columns = [column_name for column_name in expected_columns if column_name not in actual_columns]
+    if not missing_columns:
+        return
+
+    for column_name in missing_columns:
+        ddl = expected_columns[column_name]
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {SKILLS_ITEMS_TABLE.name} ADD COLUMN IF NOT EXISTS {column_name} {ddl}"
+                    )
+                )
+            else:
+                conn.execute(text(f"ALTER TABLE {SKILLS_ITEMS_TABLE.name} ADD COLUMN {column_name} {ddl}"))
 
 
 def _cost_anomaly_results_create_sql_for_engine(engine: Engine) -> str:
@@ -2082,6 +2762,7 @@ def _migrate_legacy_skills_storage(engine: Engine) -> bool:
     normalized_items["snapshot_id"] = str(legacy_snapshot["snapshot_id"])
     normalized_items["short_name"] = normalized_items["short_name"].astype(str)
     normalized_items["algorithm_type"] = normalized_items["algorithm_type"].fillna("").astype(str)
+    normalized_items["skill_payload_json"] = None
     for numeric_column in [
         "sigma_param",
         "expert_weight",
@@ -2104,6 +2785,7 @@ def _migrate_legacy_skills_storage(engine: Engine) -> bool:
                 "lower_bound",
                 "upper_bound",
                 "base_price",
+                "skill_payload_json",
             ]
         ]
     )
@@ -2138,6 +2820,10 @@ def _ensure_skills_storage_tables() -> None:
     actual_items_columns = _get_table_columns(engine, SKILLS_ITEMS_TABLE.name)
     expected_snapshots_columns = [column.name for column in SKILLS_SNAPSHOTS_TABLE.columns]
     expected_items_columns = [column.name for column in SKILLS_ITEMS_TABLE.columns]
+
+    if actual_items_columns and "skill_payload_json" not in actual_items_columns and set(actual_items_columns).issubset(set(expected_items_columns)):
+        _ensure_skills_items_columns()
+        actual_items_columns = _get_table_columns(engine, SKILLS_ITEMS_TABLE.name)
 
     snapshots_mismatch = bool(actual_snapshots_columns) and actual_snapshots_columns != expected_snapshots_columns
     items_mismatch = bool(actual_items_columns) and actual_items_columns != expected_items_columns
@@ -2174,16 +2860,21 @@ def _import_feedback_from_legacy_csv() -> None:
     if "record_key" not in legacy_df.columns or "label" not in legacy_df.columns:
         return
 
+    if "remark" not in legacy_df.columns:
+        legacy_df["remark"] = ""
     if "labeled_at" not in legacy_df.columns:
         legacy_df["labeled_at"] = datetime.now()
+    legacy_df["remark"] = legacy_df["remark"].fillna("").astype(str)
     legacy_df["labeled_at"] = pd.to_datetime(legacy_df["labeled_at"], errors="coerce")
     legacy_df["labeled_at"] = legacy_df["labeled_at"].fillna(pd.Timestamp(datetime.now()))
-    rows = _rows_from_dataframe(legacy_df[["record_key", "label", "labeled_at"]].drop_duplicates("record_key", keep="last"))
+    rows = _rows_from_dataframe(
+        legacy_df[["record_key", "label", "remark", "labeled_at"]].drop_duplicates("record_key", keep="last")
+    )
     _upsert_rows(
         EXPERT_FEEDBACK_TABLE,
         rows,
         conflict_columns=["record_key"],
-        update_columns=["label", "labeled_at"],
+        update_columns=["label", "remark", "labeled_at"],
     )
 
 
@@ -2283,7 +2974,6 @@ def initialize_supabase_storage() -> None:
 # ---------------------------------------------------------------------------
 _EXPERT_WEIGHT = 80  # 专家标注样本在 KDE 拟合中的复制倍数
 
-@st.cache_data
 def detect_cost_anomalies_weighted(
     df: pd.DataFrame,
     price_col: str,
@@ -2306,7 +2996,7 @@ def detect_cost_anomalies_weighted(
     price_col : str
         价格列名。
     expert_labels_tuple : tuple
-        ``((record_key, label), ...)`` — 由 ``tuple(label_manager.get_labels().items())``
+        ``((record_key, label), ...)`` — 由 ``tuple(get_latest_feedback().items())``
         传入以便 Streamlit ``cache_data`` 可正确缓存。
     sigma_multiplier : float
         KDE 带宽缩放系数，>1 放宽边界，<1 收紧边界。默认 1.0。
@@ -2638,4 +3328,3 @@ def detect_cost_anomalies_weighted(
     return result_df
 
 
-initialize_supabase_storage()

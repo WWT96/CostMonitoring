@@ -15,9 +15,9 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
@@ -54,6 +54,11 @@ _state: Dict[str, Any] = {
 }
 
 
+@app.on_event("startup")
+def initialize_storage_on_startup() -> None:
+    processor.service.initialize_storage()
+
+
 # ---------------------------------------------------------------------------
 # 鉴权依赖
 # ---------------------------------------------------------------------------
@@ -66,17 +71,6 @@ def _verify_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效的 API Token，请检查 Authorization: Bearer <token> 请求头。",
         )
-
-
-# ---------------------------------------------------------------------------
-# 持久化
-# ---------------------------------------------------------------------------
-def _persist_cache(df: pd.DataFrame, price_col: Optional[str]) -> None:
-    """将 DataFrame 写入 Supabase 的 core_cost_records 表。"""
-    try:
-        processor.persist_core_cost_records(df, price_col=price_col, mode="full")
-    except Exception as exc:
-        logger.warning("数据库持久化失败（数据仍保留在内存中）: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -97,15 +91,20 @@ class AnomalyRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @app.get("/health", summary="健康检查（无需认证）", tags=["监控"])
 def health() -> dict:
-    """返回服务状态及当前内存缓存概况，无需认证。"""
-    df: Optional[pd.DataFrame] = _state["df"]
+    """返回服务状态及数据库核心成本表概况，无需认证。"""
+    try:
+        db_status = processor.service.get_core_cost_records_status()
+    except Exception as exc:
+        logger.exception("数据库健康检查失败")
+        raise HTTPException(status_code=503, detail=f"数据库健康检查失败: {exc}")
+
     return {
         "status": "ok",
-        "cached_records": int(len(df)) if df is not None else 0,
+        "cached_records": db_status["row_count"],
         "cache_updated_at": (
-            _state["updated_at"].isoformat() if _state["updated_at"] else None
+            db_status["updated_at"].isoformat() if db_status["updated_at"] else None
         ),
-        "price_col": _state["price_col"],
+        "price_col": db_status["price_col"],
     }
 
 
@@ -117,10 +116,11 @@ def health() -> dict:
 )
 async def sync_data(body: SyncRequest) -> dict:
     """
-    接收 Java / 企业系统推送的批量数据并写入内存缓存与 PostgreSQL 表。
+    接收 Java / 企业系统推送的批量数据并写入 PostgreSQL 表，
+    仅在数据库事务提交成功后返回 200。
 
-    - **mode=full**：全量替换内存缓存及 core_cost_records 表。
-    - **mode=incremental**：追加后按（物料编码, 工厂, monitor_date）去重，保留最新记录。
+    - **mode=full**：全量替换 core_cost_records 表。
+    - **mode=incremental**：按（物料编码, 工厂, monitor_date）执行数据库级 UPSERT，保留最新记录。
 
     `records` 中的字段名可以是中文标准列名，
     也可以是 `processor.FIELD_MAP` 中定义的英文 / Java 字段名（如 `partId`、`validDate`）。
@@ -140,28 +140,40 @@ async def sync_data(body: SyncRequest) -> dict:
     if err:
         raise HTTPException(status_code=422, detail=f"数据处理失败: {err}")
 
-    if body.mode == "full" or _state["df"] is None:
-        _state["df"] = df
-    else:
-        _state["df"] = (
-            pd.concat([_state["df"], df], ignore_index=True)
-            .drop_duplicates(subset=["物料编码", "工厂", "monitor_date"], keep="last")
-            .reset_index(drop=True)
+    try:
+        persisted_rows = await loop.run_in_executor(
+            _executor,
+            partial(processor.service.sync_core_cost_records, df, price_col=price_col, mode=body.mode),
         )
+    except Exception as exc:
+        logger.exception("数据库持久化失败")
+        raise HTTPException(status_code=500, detail=f"数据库持久化失败: {exc}")
 
-    _state["price_col"] = price_col
-    _state["updated_at"] = datetime.now()
+    try:
+        db_status = await loop.run_in_executor(
+            _executor,
+            processor.service.get_core_cost_records_status,
+        )
+    except Exception as exc:
+        logger.warning("数据库已提交，但状态回读失败: %s", exc)
+        db_status = {
+            "row_count": None,
+            "updated_at": None,
+            "price_col": price_col or "成本",
+        }
 
-    # 异步持久化（不阻塞响应返回）
-    await loop.run_in_executor(_executor, _persist_cache, _state["df"], _state["price_col"])
+    _state["df"] = None
+    _state["price_col"] = db_status["price_col"]
+    _state["updated_at"] = db_status["updated_at"]
 
     return {
         "status": "ok",
         "mode": body.mode,
         "received": len(body.records),
-        "cached_total": int(len(_state["df"])),
-        "price_col": price_col,
-        "updated_at": _state["updated_at"].isoformat(),
+        "persisted_rows": persisted_rows,
+        "cached_total": db_status["row_count"],
+        "price_col": db_status["price_col"],
+        "updated_at": db_status["updated_at"].isoformat() if db_status["updated_at"] else None,
     }
 
 
