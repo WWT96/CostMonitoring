@@ -1,8 +1,41 @@
+# --- 1. 敏感信息（绝对禁止上传） ---
 .env
+
+# --- 2. Python 环境与缓存 ---
+__pycache__/
+*.py[cod]
+*$py.class
 .venv/
 venv/
-__pycache__/
-*.pyc
-.streamlit/
+env/
+build/
+dist/
+
+# --- 3. 测试数据与过时的本地缓存 ---
+# 忽略所有测试用的 Excel 和 CSV 数据
+test_data.csv
+test_data.xlsx
+# 忽略之前的本地持久化文件（现在已改用数据库）
 api_cache.parquet
 user_feedback.csv
+skills_active.json
+# 忽略测试数据生成脚本
+generate_test_data.py
+
+# --- 4. IDE 与 AI 工具记录 ---
+# 忽略 VS Code 的个人设置
+.vscode/
+# 忽略 AI Agent 的运行日志和缓存
+.agents/
+# 如果你不希望别人看到你的 Copilot 指令，可以取消下面这行的注释
+# .github/
+
+# --- 5. Streamlit 特有文件 ---
+.streamlit/
+
+# --- 6. 操作系统冗余 ---
+.DS_Store
+Thumbs.db
+
+# --- 7. 日志文件 ---
+*.log
