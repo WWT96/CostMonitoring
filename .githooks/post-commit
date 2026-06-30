@@ -1,0 +1,32 @@
+#!/bin/sh
+# Auto-push the current branch after every successful local commit.
+# Set COST_MONITORING_SKIP_AUTO_PUSH=1 to disable this hook for one commit.
+
+if [ "${COST_MONITORING_SKIP_AUTO_PUSH:-}" = "1" ]; then
+  exit 0
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  exit 0
+fi
+
+branch="$(git branch --show-current 2>/dev/null || true)"
+if [ -z "$branch" ]; then
+  echo "auto-push skipped: detached HEAD" >&2
+  exit 0
+fi
+
+remote="${COST_MONITORING_AUTO_PUSH_REMOTE:-origin}"
+log_file="$(git rev-parse --git-dir)/post-commit-auto-push.log"
+
+{
+  printf '\n[%s] auto-push %s/%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$remote" "$branch"
+  git push -u "$remote" "HEAD:$branch"
+} >>"$log_file" 2>&1
+
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "auto-push failed; see $log_file" >&2
+fi
+
+exit 0
