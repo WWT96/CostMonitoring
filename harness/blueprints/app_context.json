@@ -1,0 +1,72 @@
+{
+  "anchor_text": "def inject_css",
+  "description": "全局表格对齐与 Harness 启动入口锁定",
+  "module_name": "app_context",
+  "relative_path": "app_context.py",
+  "structure": {
+    "required_assignments": [
+      "SESSION_DEFAULTS",
+      "PATH_SESSION_KEYS"
+    ],
+    "required_functions": [
+      {
+        "name": "initialize_session_state"
+      },
+      {
+        "name": "bootstrap_app"
+      },
+      {
+        "name": "sync_ai_knowledge_base"
+      }
+    ],
+    "required_function_calls": [
+      {
+        "scope": "bootstrap_app",
+          "calls": [
+            "initialize_session_state",
+            "normalize_active_page_alias",
+            "maybe_bootstrap_runtime_governance",
+            "ensure_storage_initialized",
+            "bootstrap_local_data"
+          ],
+        "severity": "error"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def inject_css",
+      "id": "table_header_alignment",
+      "label": "表头必须居中",
+      "mode": "contains_all",
+      "patterns": [
+        "[role=\"columnheader\"]",
+        "justify-content: center !important;",
+        "text-align: center !important;"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def inject_css",
+      "id": "table_cell_alignment",
+      "label": "表格内容必须左对齐",
+      "mode": "contains_all",
+      "patterns": [
+        "[role=\"gridcell\"]",
+        "justify-content: flex-start !important;",
+        "text-align: left !important;"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def bootstrap_app",
+      "id": "harness_bootstrap",
+      "label": "应用启动时必须触发 Harness",
+      "mode": "contains_all",
+      "patterns": [
+        "maybe_bootstrap_runtime_governance"
+      ],
+      "severity": "error"
+    }
+  ]
+}

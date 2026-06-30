@@ -1,0 +1,85 @@
+{
+  "anchor_text": "def require_db_engine",
+  "description": "数据库服务门面与 Harness 中间件锁定",
+  "module_name": "storage_service",
+  "relative_path": "storage_service.py",
+  "structure": {
+    "required_functions": [
+      {
+        "name": "require_db_engine"
+      },
+      {
+        "name": "get_latest_core_cost_lookup"
+      },
+      {
+        "name": "load_cost_anomaly_results"
+      },
+      {
+        "name": "save_cost_anomaly_results"
+      }
+    ],
+    "required_classes": [
+      {
+        "name": "LabelManager",
+        "methods": [
+          {
+            "name": "get_labels"
+          },
+          {
+            "name": "replace_all"
+          },
+          {
+            "name": "delete_labels"
+          }
+        ]
+      },
+      {
+        "name": "CostMonitoringService",
+        "methods": [
+          {
+            "name": "initialize_storage"
+          },
+          {
+            "name": "sync_core_cost_records"
+          },
+          {
+            "name": "load_core_cost_records"
+          }
+        ]
+      }
+    ],
+    "required_function_calls": [
+      {
+        "scope": "require_db_engine",
+        "calls": [
+          "harness.authorize_db_operation"
+        ],
+        "severity": "error"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def require_db_engine",
+      "id": "db_engine_guard",
+      "label": "数据库引擎获取必须经过 Harness",
+      "mode": "contains_all",
+      "patterns": [
+        "def require_db_engine(",
+        "harness.authorize_db_operation"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "class CostMonitoringService",
+      "id": "service_middleware",
+      "label": "Service 层动作必须经过 Harness",
+      "mode": "contains_all",
+      "patterns": [
+        "class CostMonitoringService:",
+        "harness.run_db_action"
+      ],
+      "severity": "error"
+    }
+  ]
+}

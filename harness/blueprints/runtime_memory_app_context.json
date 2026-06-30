@@ -1,0 +1,45 @@
+{
+  "anchor_text": "def clear_loaded_data_state",
+  "description": "运行内存治理：会话数据可释放且缓存有边界",
+  "module_name": "runtime_memory_app_context",
+  "relative_path": "app_context.py",
+  "structure": {
+    "required_functions": [
+      {
+        "name": "clear_loaded_data_state"
+      },
+      {
+        "name": "cached_pivot_report"
+      },
+      {
+        "name": "cached_trend_report"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def clear_loaded_data_state",
+      "id": "session_release_clears_download_payloads",
+      "label": "释放会话必须清理导出缓存",
+      "mode": "contains_all",
+      "patterns": [
+        "_deferred_download_",
+        "state[\"data\"] = None",
+        "cached_pivot_report"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "@st.cache_data(max_entries=6, ttl=900)",
+      "id": "streamlit_cache_bounds",
+      "label": "Streamlit 缓存必须有边界",
+      "mode": "contains_all",
+      "patterns": [
+        "@st.cache_data(max_entries=6, ttl=900)",
+        "@st.cache_data(max_entries=4, ttl=900)",
+        "@st.cache_data(max_entries=3, ttl=900)"
+      ],
+      "severity": "error"
+    }
+  ]
+}

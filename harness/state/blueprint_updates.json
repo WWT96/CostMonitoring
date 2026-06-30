@@ -1,0 +1,56 @@
+{
+	"anomaly_engine": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "anomaly_engine.py",
+		"sha256": "b6549c14c7bdadffcdc7e12f5276c4163709d3035b7c8c65c0469f072fda907b"
+	},
+	"app": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "app.py",
+		"sha256": "c50e75df05c4b8a43f2920e858f992a6462f2b79dc4f66fef5fe8c82bc869002"
+	},
+	"app_context": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "app_context.py",
+		"sha256": "1cc6f99c7acf4fca0e6e5b026d7fcbf7b0a956fb668ca80c68f5fe71f5ae412c"
+	},
+	"assembly_logic": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "assembly_logic.py",
+		"sha256": "84967562b22bb98fbad55c6fa329154a651449710c119de31a1b8146d2c8a8a4"
+	},
+	"assembly_ui": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "assembly_ui.py",
+		"sha256": "7ed3d2baeebcc6b1323152697d3fbe36608944ee87819946d8ae0db193e36287"
+	},
+	"llm_engine": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "llm_engine.py",
+		"sha256": "8b1b7641c3e7edba3c4a40e6f607238bf0315c573d70850af0ab3192cfd5a820"
+	},
+	"sheet_metal_logic": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "sheet_metal_logic.py",
+		"sha256": "ca6742ffcd26477389e257fc54391dd5e0c82a1e61d0b7e5b70823ead5288caa"
+	},
+	"skills_engine": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "skills_engine.py",
+		"sha256": "2a8a70bb7d56b08ed5a1279a95b0f3233dbeb0f78bb8b35a3711b5cf113e15a4"
+	},
+	"storage_service": {
+		"confirmation_phrase": "initial_kotasp_baseline",
+		"confirmed_at": "2026-06-01T00:00:00+00:00",
+		"relative_path": "storage_service.py",
+		"sha256": "ee1c55588aed7ea3bed9bd9cfac6e52f7ef074a04669dc7c8730a7ad08382d1b"
+	}
+}

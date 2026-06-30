@@ -1,8 +1,13 @@
-# --- 1. 敏感信息（绝对禁止上传） ---
+# --- 1. 本地配置与数据（绝对禁止上传） ---
+settings.json
 .env
+cost_monitor_data.db
+logs/
 
 # --- 2. Python 环境与缓存 ---
 __pycache__/
+.pytest_cache/
+pytest-cache-files-*/
 *.py[cod]
 *$py.class
 .venv/
@@ -10,17 +15,15 @@ venv/
 env/
 build/
 dist/
+wheels/
+*.exe
 
 # --- 3. 测试数据与过时的本地缓存 ---
 # 忽略所有测试用的 Excel 和 CSV 数据
 test_data.csv
 test_data.xlsx
-# 忽略之前的本地持久化文件（现在已改用数据库）
-api_cache.parquet
-user_feedback.csv
-skills_active.json
-# 忽略测试数据生成脚本
-generate_test_data.py
+data/cache/
+data/benchmark_runtime/
 
 # --- 4. IDE 与 AI 工具记录 ---
 # 忽略 VS Code 的个人设置

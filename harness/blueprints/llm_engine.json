@@ -1,0 +1,59 @@
+{
+  "anchor_text": "def _call_llm",
+  "description": "LLM 沙箱与 Harness 中间件锁定",
+  "module_name": "llm_engine",
+  "relative_path": "llm_engine.py",
+  "structure": {
+    "required_functions": [
+      {
+        "name": "sanitize_data_for_llm"
+      },
+      {
+        "name": "_call_llm"
+      },
+      {
+        "name": "sync_expert_knowledge_base"
+      }
+    ],
+    "required_function_calls": [
+      {
+        "scope": "_call_llm",
+        "calls": [
+          "harness.run_llm_action"
+        ],
+        "severity": "error"
+      },
+      {
+        "scope": "sync_expert_knowledge_base",
+        "calls": [
+          "harness.execute_action"
+        ],
+        "severity": "error"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def sanitize_data_for_llm",
+      "id": "llm_sanitizer_exists",
+      "label": "LLM 数据净化函数必须存在",
+      "mode": "contains_all",
+      "patterns": [
+        "def sanitize_data_for_llm(",
+        "_LLM_BLOCKED_KEY_TOKENS"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def _call_llm",
+      "id": "llm_harness_guard",
+      "label": "LLM 请求必须经过 Harness",
+      "mode": "contains_all",
+      "patterns": [
+        "harness.run_llm_action",
+        "harness.sanitize_and_validate_llm_payload"
+      ],
+      "severity": "error"
+    }
+  ]
+}

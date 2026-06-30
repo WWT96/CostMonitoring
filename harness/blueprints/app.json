@@ -1,0 +1,57 @@
+{
+  "anchor_text": "def _render_sidebar",
+  "description": "导航三定律锁定",
+  "module_name": "app",
+  "relative_path": "app.py",
+  "structure": {
+    "required_assignments": [
+      "BOARD_PAGES",
+      "ANOMALY_PAGES",
+      "SKILLS_PAGES",
+      "SECTION_DEFINITIONS",
+      "PAGE_RENDERERS"
+    ],
+    "required_functions": [
+      {
+        "name": "_render_sidebar"
+      },
+      {
+        "name": "main"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def _render_sidebar",
+      "id": "nav_top_dual",
+      "label": "顶部独立双项导航",
+      "mode": "contains_all",
+      "patterns": [
+        "key=\"nav_quick_overview\"",
+        "key=\"nav_quick_settings\""
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def _render_sidebar",
+      "id": "nav_gray_divider",
+      "label": "顶部双项后必须存在灰线分隔",
+      "mode": "contains_all",
+      "patterns": [
+        "st.sidebar.divider()"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def _render_sidebar",
+      "id": "nav_neighbor_expanders",
+      "label": "灰线后必须使用邻近 Expander 子菜单",
+      "mode": "contains_all",
+      "patterns": [
+        "st.sidebar.expander(",
+        "for section_name in [\"全量成本看板\", \"异常监控体系\", \"Skills 技能引擎\"]"
+      ],
+      "severity": "error"
+    }
+  ]
+}

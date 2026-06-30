@@ -1,0 +1,52 @@
+{
+  "anchor_text": "def run_auto_research",
+  "description": "AutoResearch 棘轮迭代锁定",
+  "module_name": "skills_engine",
+  "relative_path": "skills_engine.py",
+  "structure": {
+    "required_assignments": [
+      "AUTORESEARCH_PARAM_GRID",
+      "AUTORESEARCH_MAX_RUNTIME_SECONDS"
+    ],
+    "required_functions": [
+      {
+        "name": "_is_trial_better"
+      },
+      {
+        "name": "run_auto_research"
+      },
+      {
+        "name": "extract_skills"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "AUTORESEARCH_PARAM_GRID",
+      "id": "autoresearch_param_grid",
+      "label": "AutoResearch 参数空间必须保留四维",
+      "mode": "contains_all",
+      "patterns": [
+        "AUTORESEARCH_PARAM_GRID = {",
+        "\"sigma\"",
+        "\"expert_weight\"",
+        "\"decay_alpha\"",
+        "\"gap_k\""
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def run_auto_research",
+      "id": "autoresearch_ratchet",
+      "label": "AutoResearch 必须保留棘轮采纳逻辑",
+      "mode": "contains_all",
+      "patterns": [
+        "def run_auto_research(",
+        "accepted = _is_trial_better",
+        "if accepted:",
+        "prev_best = {"
+      ],
+      "severity": "error"
+    }
+  ]
+}

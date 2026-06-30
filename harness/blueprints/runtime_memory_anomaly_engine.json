@@ -1,0 +1,31 @@
+{
+  "anchor_text": "def _should_use_parallel_detection",
+  "description": "运行内存治理：低配桌面端默认禁用进程池并行",
+  "module_name": "runtime_memory_anomaly_engine",
+  "relative_path": "anomaly_engine.py",
+  "structure": {
+    "required_assignments": [
+      "DGB_PROCESS_POOL_ENV",
+      "TRUE_ENV_VALUES"
+    ],
+    "required_functions": [
+      {
+        "name": "_should_use_parallel_detection"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def _should_use_parallel_detection",
+      "id": "parallel_detection_env_gate",
+      "label": "进程池并行必须由环境变量显式开启",
+      "mode": "contains_all",
+      "patterns": [
+        "COST_MONITOR_ENABLE_PROCESS_POOL",
+        "os.environ.get(DGB_PROCESS_POOL_ENV",
+        "return False"
+      ],
+      "severity": "error"
+    }
+  ]
+}
