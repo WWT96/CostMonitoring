@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$RepoRoot = "",
     [string]$Remote = "origin",
     [int]$DebounceSeconds = 60,
     [int]$PollSeconds = 15,
@@ -150,6 +150,10 @@ function Invoke-AutoSync {
     finally {
         Remove-Item -LiteralPath $script:LockPath -Force -ErrorAction SilentlyContinue
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 
 $script:RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path

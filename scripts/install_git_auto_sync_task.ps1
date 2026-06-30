@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$RepoRoot = "",
     [string]$TaskName = "CostMonitoring Git Auto Sync",
     [int]$DebounceSeconds = 60,
     [int]$PollSeconds = 15
@@ -8,6 +8,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
 
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $syncScript = Join-Path $RepoRoot "scripts\git_auto_sync.ps1"
