@@ -90,7 +90,7 @@ function Invoke-AutoSync {
     New-Item -ItemType File -Path $script:LockPath -Force | Out-Null
     try {
         Set-Location -LiteralPath $script:RepoRoot
-        $status = Get-GitStatus
+        $status = @(Get-GitStatus)
         if ($status.Count -eq 0) {
             return
         }
@@ -177,7 +177,7 @@ if ($Once) {
 while ($true) {
     Start-Sleep -Seconds $PollSeconds
     try {
-        $status = Get-GitStatus
+        $status = @(Get-GitStatus)
         if ($status.Count -eq 0) {
             continue
         }
