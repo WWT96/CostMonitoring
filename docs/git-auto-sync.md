@@ -30,6 +30,14 @@ For hands-off syncing, install the Windows scheduled task:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_git_auto_sync_task.ps1
 ```
 
+If Windows denies scheduled task registration, the installer falls back to a user Startup shortcut:
+
+```text
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\CostMonitoring Git Auto Sync.lnk
+```
+
+That shortcut starts the same background sync script when the current Windows user logs in.
+
 The task starts at Windows logon and watches this repo by polling `git status`. When tracked or untracked non-ignored files change, it waits for a debounce window, then runs:
 
 ```text
@@ -45,5 +53,7 @@ Remove the task:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall_git_auto_sync_task.ps1
 ```
+
+The uninstall script removes either setup: the scheduled task if present, and the Startup shortcut if present.
 
 Background sync logs are written to `.git/auto-sync.log`.
