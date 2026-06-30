@@ -1,0 +1,39 @@
+{
+  "anchor_text": "def _render_sidebar",
+  "description": "独立导航布局蓝图锁定",
+  "module_name": "nav_layout",
+  "relative_path": "app.py",
+  "structure": {
+    "required_functions": [
+      {
+        "name": "_render_sidebar"
+      }
+    ],
+    "required_function_calls": [
+      {
+        "scope": "_render_sidebar",
+        "calls": [
+          "harness.render_sidebar_integrity_warning",
+          "st.sidebar.divider",
+          "st.sidebar.expander",
+          "harness.render_sidebar_governance_status"
+        ],
+        "severity": "error"
+      }
+    ],
+    "required_string_literals": [
+      {
+        "scope": "_render_sidebar",
+        "values": [
+          "nav_quick_overview",
+          "nav_quick_settings",
+          "全量成本看板",
+          "异常监控体系",
+          "Skills 技能引擎"
+        ],
+        "severity": "error"
+      }
+    ]
+  },
+  "rules": []
+}

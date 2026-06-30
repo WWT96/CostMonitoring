@@ -1,0 +1,47 @@
+{
+  "description": "低配桌面端运行治理标准。用于约束后续整改、重构和验收脚本，避免重新引入越用越卡的内存滞留路径。",
+  "last_reviewed_at": "2026-06-24",
+  "owner": "CostMonitoring Harness",
+  "status": "active",
+  "verification_checklist": [
+    {
+      "id": "deferred_download_payloads",
+      "standard": "大体积 Excel 或技能书导出必须延迟到用户点击准备按钮后生成，下载完成后清理 session_state 中的二进制载荷。",
+      "evidence": [
+        "page_ui_helpers.render_deferred_download_button",
+        "page_ui_helpers.clear_deferred_download_payload"
+      ]
+    },
+    {
+      "id": "bounded_streamlit_caches",
+      "standard": "所有 st.cache_data 缓存必须显式设置 max_entries 和 ttl，防止低配环境长期运行后缓存无限增长。",
+      "evidence": [
+        "tests.test_ops_scripts.test_streamlit_data_caches_are_bounded"
+      ]
+    },
+    {
+      "id": "explicit_session_release",
+      "standard": "系统设置页必须保留显式释放当前会话数据能力，释放 data、price_col、导出缓存和相关计算缓存。",
+      "evidence": [
+        "app_context.clear_loaded_data_state",
+        "general_pages.render_settings_page"
+      ]
+    },
+    {
+      "id": "low_spec_parallelism_gate",
+      "standard": "成本异常检测的进程池并行必须默认关闭，只能通过 COST_MONITOR_ENABLE_PROCESS_POOL 显式开启。",
+      "evidence": [
+        "anomaly_engine._should_use_parallel_detection",
+        "COST_MONITOR_ENABLE_PROCESS_POOL"
+      ]
+    },
+    {
+      "id": "regression_with_db_restore",
+      "standard": "运营回归脚本必须在执行后恢复本地数据库族文件，避免测试数据污染正式预览库。",
+      "evidence": [
+        "scripts.run_ops_regression.snapshot_db_family",
+        "scripts.run_ops_regression.restore_db_family"
+      ]
+    }
+  ]
+}

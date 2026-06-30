@@ -1,0 +1,46 @@
+{
+  "anchor_text": "def render_deferred_download_button",
+  "description": "运行内存治理：导出载荷延迟生成并可清理",
+  "module_name": "runtime_memory_page_ui_helpers",
+  "relative_path": "page_ui_helpers.py",
+  "structure": {
+    "required_assignments": [
+      "DEFERRED_DOWNLOAD_MAX_BYTES"
+    ],
+    "required_functions": [
+      {
+        "name": "clear_deferred_download_payload"
+      },
+      {
+        "name": "store_deferred_download_payload"
+      },
+      {
+        "name": "render_deferred_download_button"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def store_deferred_download_payload",
+      "id": "download_payload_size_limit",
+      "label": "导出载荷必须有大小上限",
+      "mode": "contains_all",
+      "patterns": [
+        "max_bytes: int = DEFERRED_DOWNLOAD_MAX_BYTES",
+        "payload_size > max_bytes"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def render_deferred_download_button",
+      "id": "download_payload_clear_after_success",
+      "label": "下载完成必须清理载荷",
+      "mode": "contains_all",
+      "patterns": [
+        "clear_deferred_download_payload(st.session_state, key)",
+        "if downloaded:"
+      ],
+      "severity": "error"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "db_path": "C:\\Users\\Francesco\\Documents\\trae_projects\\CostMonitoring\\cost_monitor_data.db",
+  "db_mb": 8.09,
+  "wal_mb": 0.0,
+  "shm_mb": 0.03,
+  "page_size": 4096,
+  "page_count": 2071,
+  "freelist_count": 0,
+  "freelist_mb": 0.0,
+  "freelist_ratio": 0.0,
+  "journal_mode": "wal",
+  "table_counts": {
+    "core_cost_records": 1170,
+    "cost_anomaly_results": 2340,
+    "expert_feedback": 4,
+    "expert_knowledge_base": 2,
+    "sheet_metal_feedback": 1,
+    "skills_items": 3703,
+    "skills_snapshots": 20,
+    "vehicle_market_prices": 22,
+    "vehicle_rank_config": 22
+  },
+  "missing_tables": [],
+  "thresholds": {
+    "max_freelist_ratio": 0.25,
+    "max_wal_mb": 64.0
+  },
+  "failures": []
+}

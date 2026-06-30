@@ -1,5 +1,11 @@
 # CostMonitoring 运行指南
 
+## 本地架构说明
+- 系统配置文件：`settings.json`
+- 本地数据库：`cost_monitor_data.db`
+- 本地日志目录：`logs/`
+- 启动后可在“⚙️ 系统设置”中维护数据路径、LLM Key / Base URL，并执行数据库压缩
+
 ## 环境准备
 - 确保已安装 Python（建议 3.11+）和 pip
 - 切换到项目目录：`c:\Users\Francesco\Documents\trae_projects\CostMonitoring`
@@ -62,13 +68,7 @@ python -m streamlit run app.py --server.port 8501
 - 停止服务：在运行该命令的终端按下 `Ctrl + C`
 
 ## 测试数据（可选）
-- 生成示例数据：
-
-```bash
-python generate_test_data.py
-```
-
-- 项目已包含示例数据文件：`test_data.csv`、`test_data.xlsx`（生成后）
+- 项目当前保留示例数据文件：`test_data.csv`
 
 ## 常见问题
 - 提示找不到 `streamlit`：

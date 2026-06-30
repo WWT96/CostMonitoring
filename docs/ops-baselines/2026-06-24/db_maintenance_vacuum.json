@@ -1,0 +1,46 @@
+{
+  "ok": true,
+  "vacuum": true,
+  "operations": [
+    "checkpoint",
+    "vacuum",
+    "checkpoint_after_vacuum"
+  ],
+  "before": {
+    "db_path": "C:\\Users\\Francesco\\Documents\\trae_projects\\CostMonitoring\\cost_monitor_data.db",
+    "db_bytes": 99868672,
+    "db_mb": 95.24,
+    "wal_bytes": 0,
+    "wal_mb": 0.0,
+    "shm_bytes": 32768,
+    "page_size": 4096,
+    "page_count": 24382,
+    "freelist_count": 22298,
+    "freelist_ratio": 0.9145,
+    "journal_mode": "wal"
+  },
+  "after": {
+    "db_path": "C:\\Users\\Francesco\\Documents\\trae_projects\\CostMonitoring\\cost_monitor_data.db",
+    "db_bytes": 8482816,
+    "db_mb": 8.09,
+    "wal_bytes": 0,
+    "wal_mb": 0.0,
+    "shm_bytes": 32768,
+    "page_size": 4096,
+    "page_count": 2071,
+    "freelist_count": 0,
+    "freelist_ratio": 0.0,
+    "journal_mode": "wal"
+  },
+  "saved_bytes": 91385856,
+  "checkpoint_before": {
+    "busy": 0,
+    "log_pages": 0,
+    "checkpointed_pages": 0
+  },
+  "checkpoint_after": {
+    "busy": 0,
+    "log_pages": 0,
+    "checkpointed_pages": 0
+  }
+}

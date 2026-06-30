@@ -1,0 +1,54 @@
+{
+  "anchor_text": "def calculate_recency_weight_series",
+  "description": "DGB 动态断层共识算法与时序衰减权重锁定",
+  "module_name": "anomaly_engine",
+  "relative_path": "anomaly_engine.py",
+  "structure": {
+    "required_assignments": [
+      "_TIME_DECAY_FULL_WEIGHT_DAYS",
+      "_TIME_DECAY_DECAY_DAYS",
+      "DEFAULT_DECAY_ALPHA",
+      "DEFAULT_GAP_K"
+    ],
+    "required_functions": [
+      {
+        "name": "calculate_recency_weight_series"
+      },
+      {
+        "name": "detect_dgb_anomalies"
+      },
+      {
+        "name": "detect_dgb_anomalies_weighted"
+      },
+      {
+        "name": "detect_cost_anomalies_weighted"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def calculate_recency_weight_series",
+      "id": "time_decay_formula",
+      "label": "时序衰减常量与函数必须存在",
+      "mode": "contains_all",
+      "patterns": [
+        "_TIME_DECAY_FULL_WEIGHT_DAYS = 183",
+        "_TIME_DECAY_DECAY_DAYS = 365.0",
+        "def calculate_recency_weight_series(",
+        "weights = np.exp(-((alpha * decay_days) / _TIME_DECAY_DECAY_DAYS))"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def detect_dgb_anomalies",
+      "id": "dgb_entrypoints",
+      "label": "DGB 算法入口必须存在",
+      "mode": "contains_all",
+      "patterns": [
+        "def detect_dgb_anomalies(",
+        "def detect_dgb_anomalies_weighted("
+      ],
+      "severity": "error"
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "harness_type": "packaging_release",
+  "name": "异常成本监控系统离线优先封装流程",
+  "version": "0.1.1",
+  "updated_at": "2026-06-03",
+  "purpose": "记录异常成本监控系统封装为 Windows 可分发包时必须遵守的流程、文件清单、启动器规则和验证步骤。后续功能修改后重新封装时，先按本 Harness 执行，避免重复踩启动、依赖、离线环境和发布包污染的问题。",
+  "release_target": {
+    "default_backup_path": "D:\\王文佟\\成本系统开发\\异常成本监控系统-版本管理\\异常成本监控系统0.1.1",
+    "executable_name": "异常成本监控系统0.1.1.exe",
+    "startup_url": "http://127.0.0.1:8501",
+    "port": 8501
+  },
+  "launcher_contract": {
+    "exe_role": "exe 只负责在自身所在目录调用 launcher.bat；只改 launcher.bat 时通常不需要重打 exe。",
+    "launcher_files": [
+      "异常成本监控系统0.1.1.exe",
+      "exe_launcher.py",
+      "launcher.bat",
+      "run_app.bat",
+      "build_launcher_exe.bat"
+    ],
+    "required_launcher_behaviors": [
+      "用 %~dp0 定位项目根目录，确保用户从任意位置双击都能以 exe 所在目录为运行目录。",
+      "首次运行时创建本地 venv，之后复用 venv。",
+      "优先使用 wheels 目录执行 pip install --no-index --find-links wheels -r requirements.txt，只有 wheels 不存在时才走联网安装。",
+      "安装成功后写入 venv\\.requirements_installed，二次启动跳过依赖安装。",
+      "设置 STREAMLIT_BROWSER_GATHER_USAGE_STATS=false 和 STREAMLIT_SERVER_HEADLESS=true，避免首次启动出现 Streamlit 邮箱订阅提示。",
+      "启动命令必须传入 --server.port=8501 --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false。",
+      "启动后用 http://127.0.0.1:8501/_stcore/health 做健康检查，不再使用 Test-NetConnection 作为主判断。",
+      "健康检查等待至少 180 秒，满足首次建库或慢机器启动。",
+      "不要在 start Streamlit 之后立即用旧 errorlevel 判断失败；旧健康检查失败留下的 errorlevel 会误触发 Startup failed。",
+      "Streamlit 输出重定向到 logs\\streamlit-last.log，方便定位真实失败原因。",
+      "如果等待超时，不直接判失败；先打开浏览器到固定 URL，并提示用户等待刷新。"
+    ],
+    "known_failure_to_prevent": [
+      "双击 exe 出现 Startup failed，但 PowerShell 手动运行 streamlit 可以打开。这通常是启动器误判服务状态，不是程序本体或依赖失败。",
+      "首次运行出现 Welcome to Streamlit / Email 提示。必须由 .streamlit/config.toml、环境变量和启动参数三层共同关闭 gatherUsageStats。",
+      "离线电脑 pip 报 No matching distribution found。优先检查 wheels 中是否缺少对应 Python 版本或条件依赖，例如 Python < 3.11 需要 exceptiongroup。"
+    ]
+  },
+  "streamlit_config_contract": {
+    "required_file": ".streamlit/config.toml",
+    "required_content": [
+      "[browser]",
+      "gatherUsageStats = false",
+      "[server]",
+      "headless = true",
+      "address = \"127.0.0.1\"",
+      "port = 8501"
+    ]
+  },
+  "offline_dependency_contract": {
+    "requirements_file": "requirements.txt",
+    "wheel_directory": "wheels",
+    "install_command": "\"%PYTHON_EXE%\" -m pip install --no-index --find-links \"%WHEEL_DIR%\" -r \"%PROJECT_ROOT%requirements.txt\"",
+    "required_wheel_examples": [
+      "exceptiongroup-1.3.1-py3-none-any.whl"
+    ],
+    "python_versions_to_cover": [
+      "3.10",
+      "3.11",
+      "3.12",
+      "3.13"
+    ],
+    "verification": [
+      "离线安装前删除发布包内 venv，确保测试模拟新电脑首次运行。",
+      "用本地 wheels 完成安装，不依赖外网。",
+      "安装后至少验证 streamlit、pandas、numpy、plotly、sqlalchemy、sklearn、openpyxl、xlsxwriter、requests、pyarrow 可 import。",
+      "如果更改 requirements.txt，必须重新刷新 wheels，并重新做一次离线安装验证。"
+    ]
+  },
+  "release_package_manifest": {
+    "must_include": [
+      ".streamlit/config.toml",
+      "wheels/*.whl",
+      "requirements.txt",
+      "异常成本监控系统0.1.1.exe",
+      "launcher.bat",
+      "run_app.bat",
+      "build_launcher_exe.bat",
+      "exe_launcher.py",
+      "*.py",
+      "harness.py",
+      "harness/**",
+      "README.md",
+      "settings.json"
+    ],
+    "must_exclude": [
+      "venv/",
+      ".venv/",
+      "build/",
+      "dist/",
+      "__pycache__/",
+      ".pytest_cache/",
+      "*.spec",
+      "logs/",
+      "data/",
+      "cost_monitor_data.db",
+      "test_data.csv",
+      "test_data.xlsx"
+    ],
+    "notes": [
+      "不要只复制 exe；必须复制整个发布目录。",
+      "发布包测试会生成 venv、logs、data 或数据库文件，测试完成后必须清理再压缩。",
+      "如果只修改 launcher.bat，可直接同步 launcher.bat 到发布目录，通常不用重建 exe。"
+    ]
+  },
+  "packaging_steps": [
+    "完成业务代码修改，并确认 Streamlit 本地页面可打开。",
+    "检查 requirements.txt 是否变化；如有变化，刷新 wheels 离线依赖目录。",
+    "确认 .streamlit/config.toml 存在且关闭 gatherUsageStats。",
+    "确认 launcher.bat 使用离线优先安装、健康检查和日志输出逻辑。",
+    "如 exe_launcher.py 或 exe 名称变化，运行 build_launcher_exe.bat 重新构建 exe；只改 launcher.bat 时可跳过重建 exe。",
+    "同步必要文件到 release_target.default_backup_path，排除 venv、data、logs、build、dist、缓存、测试数据和本地数据库。",
+    "在发布目录删除 venv 后运行 launcher.bat 或 exe，验证首次启动能自动安装并打开 http://127.0.0.1:8501。",
+    "保持服务运行时再次运行 launcher.bat 或 exe，验证二次启动能直接打开浏览器。",
+    "停止发布目录 Streamlit 测试进程，清理测试生成的 venv、logs、data、cost_monitor_data.db 和 __pycache__。",
+    "最终审计发布目录文件数量、总大小、必须包含文件和必须排除文件，再压缩分发。"
+  ],
+  "verification_checklist": [
+    {
+      "id": "launcher_health_check",
+      "label": "启动器健康检查",
+      "pass_condition": "launcher.bat 包含 /_stcore/health，等待循环至少 180 秒，且 start Streamlit 后没有立即 if errorlevel 1 goto :fail。"
+    },
+    {
+      "id": "streamlit_prompt_suppressed",
+      "label": "Streamlit 邮箱提示关闭",
+      "pass_condition": ".streamlit/config.toml、环境变量和启动参数都关闭 browser.gatherUsageStats。"
+    },
+    {
+      "id": "offline_wheels_present",
+      "label": "离线依赖存在",
+      "pass_condition": "wheels 目录存在，包含 requirements.txt 解析所需依赖；Python 3.10 环境必须包含 exceptiongroup。"
+    },
+    {
+      "id": "first_run_verified",
+      "label": "首次启动验证",
+      "pass_condition": "发布目录无 venv 时运行启动器，能自动建 venv、离线安装依赖并打开页面。"
+    },
+    {
+      "id": "second_run_verified",
+      "label": "二次启动验证",
+      "pass_condition": "保留 venv 再次运行启动器，能快速打开页面，不重新安装依赖。"
+    },
+    {
+      "id": "release_clean",
+      "label": "发布包清理",
+      "pass_condition": "压缩前不存在 venv、.venv、logs、data、build、dist、__pycache__、cost_monitor_data.db、测试数据文件。"
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "Startup failed，但手动运行 venv\\Scripts\\python.exe -m streamlit run app.py 可以打开",
+      "diagnosis": "优先检查 launcher.bat 的健康检查和 errorlevel 逻辑；不要先怀疑业务代码。"
+    },
+    {
+      "symptom": "No matching distribution found: exceptiongroup",
+      "diagnosis": "新电脑 Python 版本小于 3.11，wheels 里缺少 exceptiongroup 条件依赖。"
+    },
+    {
+      "symptom": "首次启动停在 Email 提示",
+      "diagnosis": "Streamlit gatherUsageStats 没有被配置文件、环境变量或命令行参数完整关闭。"
+    },
+    {
+      "symptom": "双击后没有网页，但 PowerShell 里有 URL",
+      "diagnosis": "启动器没有执行 start 浏览器，或服务健康检查等待不足；查看 logs\\streamlit-last.log。"
+    }
+  ]
+}

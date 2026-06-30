@@ -1,0 +1,48 @@
+{
+  "anchor_text": "def _vectorized_ratio",
+  "description": "BOM 审计比例公式锁定",
+  "module_name": "assembly_logic",
+  "relative_path": "assembly_logic.py",
+  "structure": {
+    "required_functions": [
+      {
+        "name": "_vectorized_ratio"
+      },
+      {
+        "name": "_build_enriched_relationship_df"
+      },
+      {
+        "name": "_build_summary_df"
+      },
+      {
+        "name": "load_and_process_assembly_data"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def _vectorized_ratio",
+      "id": "bom_ratio_function",
+      "label": "BOM 比例函数必须存在并保留除零保护",
+      "mode": "contains_all",
+      "patterns": [
+        "def _vectorized_ratio(",
+        "valid_mask = numeric_denominator.notna() & numeric_denominator.ne(0)",
+        "ratio.loc[valid_mask] = numeric_numerator.loc[valid_mask] / numeric_denominator.loc[valid_mask]"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def _build_summary_df",
+      "id": "bom_ratio_assignments",
+      "label": "三类 BOM 比例赋值必须存在",
+      "mode": "contains_all",
+      "patterns": [
+        "grouped_df[\"成本比例\"] = _vectorized_ratio",
+        "grouped_df[\"订购价比例\"] = _vectorized_ratio",
+        "grouped_df[\"零售价比例\"] = _vectorized_ratio"
+      ],
+      "severity": "error"
+    }
+  ]
+}

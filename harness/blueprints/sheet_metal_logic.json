@@ -1,0 +1,37 @@
+{
+  "anchor_text": "def _compute_sheet_metal_index",
+  "description": "钣金白痴指数公式锁定",
+  "module_name": "sheet_metal_logic",
+  "relative_path": "sheet_metal_logic.py",
+  "structure": {
+    "required_assignments": [
+      "_STEEL_DENSITY"
+    ],
+    "required_functions": [
+      {
+        "name": "_compute_sheet_metal_index"
+      },
+      {
+        "name": "detect_sheet_metal_anomalies"
+      },
+      {
+        "name": "run_sheet_metal_auto_research"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def _compute_sheet_metal_index",
+      "id": "sheet_metal_formula",
+      "label": "钣金白痴指数公式必须存在",
+      "mode": "contains_all",
+      "patterns": [
+        "_STEEL_DENSITY = 7.6",
+        "def _compute_sheet_metal_index(",
+        "denominator = (result[\"净重\"] / 1000.0) * _STEEL_DENSITY",
+        "computed_index = result[\"出厂单价\"] / denominator.replace(0, pd.NA)"
+      ],
+      "severity": "error"
+    }
+  ]
+}

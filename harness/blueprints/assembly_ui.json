@@ -1,0 +1,36 @@
+{
+  "anchor_text": "def render_assembly_audit_page",
+  "description": "拆分件树状无缝表必须使用 HTML rowspan",
+  "module_name": "assembly_ui",
+  "relative_path": "assembly_ui.py",
+  "structure": {
+    "required_functions": [
+      {
+        "name": "render_assembly_audit_page"
+      },
+      {
+        "name": "_render_tree_header"
+      },
+      {
+        "name": "_render_tree_row"
+      },
+      {
+        "name": "_render_pagination_controls"
+      }
+    ]
+  },
+  "rules": [
+    {
+      "anchor_text": "def render_assembly_audit_page",
+      "id": "rowspan_tree_table",
+      "label": "拆分件监控必须使用 HTML rowspan 树表",
+      "mode": "contains_all",
+      "patterns": [
+        "rowspan",
+        "<table",
+        "unsafe_allow_html=True"
+      ],
+      "severity": "error"
+    }
+  ]
+}
