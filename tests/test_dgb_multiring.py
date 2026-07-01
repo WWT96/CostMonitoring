@@ -1949,11 +1949,14 @@ class DgbMultiRingTests(unittest.TestCase):
         )
 
         self.assertFalse(idle["should_run"])
+        self.assertFalse(idle["should_export_result"])
         self.assertTrue(selected["should_run"])
         self.assertFalse(selected["include_all_short_names"])
+        self.assertFalse(selected["should_export_result"])
         self.assertEqual(selected["selected_short_names"], ["A件", "B件"])
         self.assertEqual(selected["scope_label"], "所选2个简称")
         self.assertTrue(all_names["include_all_short_names"])
+        self.assertTrue(all_names["should_export_result"])
         self.assertEqual(all_names["selected_short_names"], [])
         self.assertEqual(all_names["scope_label"], "全量简称")
 
@@ -1995,10 +1998,13 @@ class DgbMultiRingTests(unittest.TestCase):
         )
 
         self.assertFalse(idle["should_run"])
+        self.assertFalse(idle["should_export_result"])
         self.assertTrue(selected["should_run"])
+        self.assertFalse(selected["should_export_result"])
         self.assertEqual(selected["selected_short_names"], ["翼子板"])
         self.assertEqual(selected["scope_label"], "所选1个简称")
         self.assertTrue(all_names["include_all_short_names"])
+        self.assertTrue(all_names["should_export_result"])
         self.assertEqual(all_names["selected_short_names"], [])
         self.assertEqual(all_names["scope_label"], "全量简称")
 

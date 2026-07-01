@@ -65,6 +65,7 @@ def build_cost_anomaly_run_request(
     if calculate_all_clicked:
         return {
             "should_run": True,
+            "should_export_result": True,
             "include_all_short_names": True,
             "selected_short_names": [],
             "scope_label": "全量简称",
@@ -82,6 +83,7 @@ def build_cost_anomaly_run_request(
     if calculate_selected_clicked and selected:
         return {
             "should_run": True,
+            "should_export_result": False,
             "include_all_short_names": False,
             "selected_short_names": selected,
             "scope_label": f"所选{len(selected)}个简称",
@@ -91,6 +93,7 @@ def build_cost_anomaly_run_request(
     message = "请选择至少一个备件简称后再点击计算。" if calculate_selected_clicked else ""
     return {
         "should_run": False,
+        "should_export_result": False,
         "include_all_short_names": False,
         "selected_short_names": selected,
         "scope_label": "",
@@ -596,7 +599,7 @@ def render_cost_anomaly_page() -> None:
         calculate_selected_clicked=calculate_selected_clicked,
         calculate_all_clicked=calculate_all_clicked,
     )
-    should_export_run_result = bool(current_run_request["should_run"])
+    should_export_run_result = bool(current_run_request.get("should_export_result"))
     if current_run_request["should_run"]:
         st.session_state["cost_anomaly_active_run_request"] = current_run_request
     elif current_run_request.get("message"):

@@ -282,6 +282,11 @@ class OpsScriptsTests(unittest.TestCase):
 
         self.assertEqual(bare_cache_lines, [])
 
+    def test_streamlit_toolbar_hides_developer_cache_actions(self) -> None:
+        config_text = Path(".streamlit/config.toml").read_text(encoding="utf-8")
+
+        self.assertIn('toolbarMode = "viewer"', config_text)
+
     def test_large_excel_exports_are_deferred_until_requested(self) -> None:
         ui_files = [
             Path("general_pages.py"),
