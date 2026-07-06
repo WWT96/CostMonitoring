@@ -2046,6 +2046,34 @@ class DgbMultiRingTests(unittest.TestCase):
 
         self.assertEqual(samples["物料编码"].tolist(), ["SM-001", "SM-002"])
 
+    def test_sheet_metal_detection_preserves_cost_and_weight_fields_for_non_material_coefficients(self) -> None:
+        base_df = pd.DataFrame(
+            [
+                {
+                    "物料编码": f"SM-{idx:03d}",
+                    "物料名称": f"门板{idx}",
+                    "适用车系": "测试车系",
+                    "工厂": "F1",
+                    "备件简称": "门板",
+                    "产品成本": 80.0 + idx,
+                    "出厂单价": 100.0 + idx,
+                    "净重": 10000.0 + idx,
+                    "包装后重量": 12000.0 + idx,
+                    "白痴指数": 10.0 + idx,
+                    "monitor_date": pd.Timestamp("2026-07-06"),
+                }
+                for idx in range(6)
+            ]
+        )
+
+        review_df = detect_sheet_metal_anomalies(base_df)
+
+        for column_name in ["产品成本", "出厂单价", "净重", "包装后重量"]:
+            self.assertIn(column_name, review_df.columns)
+        row = review_df[review_df["物料编码"] == "SM-003"].iloc[0]
+        self.assertEqual(float(row["出厂单价"]), 103.0)
+        self.assertEqual(float(row["净重"]), 10003.0)
+
     def test_sheet_metal_non_material_coefficients_use_equal_weight_steel_anchor_and_fallbacks(self) -> None:
         builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
         calculator = getattr(sheet_metal_logic, "calculate_non_material_coefficients", None)
