@@ -269,6 +269,12 @@ def _render_non_material_anchor_summary(anchor: dict | None) -> None:
                     }
                 )
                 render_standard_data_editor(detail_df, "sheet_metal_non_material_anchor_model_detail", max_height=260)
+            llm_errors = anchor.get("llm_errors") or []
+            if llm_errors:
+                error_df = pd.DataFrame(llm_errors)
+                error_cols = [column for column in ["model", "error"] if column in error_df.columns]
+                error_df = error_df[error_cols].rename(columns={"model": "模型", "error": "异常信息"})
+                render_standard_data_editor(error_df, "sheet_metal_non_material_anchor_llm_errors", max_height=180)
 
 
 def _render_non_material_exclusion_summary(summary: dict | None) -> None:
