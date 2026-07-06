@@ -2174,6 +2174,60 @@ class DgbMultiRingTests(unittest.TestCase):
     def test_sheet_metal_non_material_coefficients_page_renderer_exists(self) -> None:
         self.assertTrue(callable(getattr(sheet_metal_ui, "render_sheet_metal_non_material_coefficients_page", None)))
 
+    def test_sheet_metal_public_steel_anchor_handles_security_cookie_and_partial_failures(self) -> None:
+        class FakeResponse:
+            def __init__(self, text: str, status_code: int = 200):
+                self.text = text
+                self.status_code = status_code
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+        class FakeCookies:
+            def __init__(self) -> None:
+                self.values: dict[str, str] = {}
+
+            def set(self, name: str, value: str, **_: str) -> None:
+                self.values[name] = value
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+                self.cookies = FakeCookies()
+                self.calls: list[tuple[str, bool]] = []
+
+            def get(self, url: str, timeout: float) -> FakeResponse:
+                self.calls.append((url, "HW_CHECK" in self.cookies.values))
+                if "dxb.100ppi.com" in url:
+                    raise RuntimeError("temporary unavailable")
+                if "HW_CHECK" not in self.cookies.values:
+                    return FakeResponse("var _0x2 = 'cookie-token'; document.cookie = 'HW_CHECK=' + _0x2;")
+                prices_by_url = {
+                    "https://rejuan.100ppi.com/": "3310 元/吨 3390 元/吨",
+                    "https://lyb.100ppi.com/": "3740 元/吨",
+                    "https://zhb.100ppi.com/": "中厚板参考价为3360.00",
+                }
+                return FakeResponse(prices_by_url[url])
+
+        fake_session = FakeSession()
+
+        anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(
+            as_of_date="2026-07-06",
+            session_factory=lambda: fake_session,
+        )
+
+        self.assertEqual(sheet_metal_logic._STEEL_MARKET_URLS["中厚板"], "https://zhb.100ppi.com/")
+        self.assertEqual([item["category"] for item in anchor["categories"]], ["热轧板卷", "冷轧板", "中厚板"])
+        self.assertAlmostEqual(anchor["average_price_per_ton"], 3483.3333, places=4)
+        self.assertIn(("https://rejuan.100ppi.com/", False), fake_session.calls)
+        self.assertIn(("https://rejuan.100ppi.com/", True), fake_session.calls)
+
+    def test_sheet_metal_public_steel_parser_accepts_reference_price_text(self) -> None:
+        quotes = sheet_metal_logic._parse_price_quotes_from_html("07月06日中厚板参考价为3360.00，较上一日上涨")
+
+        self.assertEqual(quotes, [3360.0])
+
     def test_cost_anomaly_chart_scope_uses_multi_selected_short_names(self) -> None:
         working_df = pd.DataFrame(
             [

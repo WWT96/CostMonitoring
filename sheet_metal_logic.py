@@ -24,7 +24,7 @@ _STEEL_MARKET_URLS = {
     "热轧板卷": "https://rejuan.100ppi.com/",
     "冷轧板": "https://lyb.100ppi.com/",
     "镀锌板": "https://dxb.100ppi.com/",
-    "中厚板": "https://steel.100ppi.com/",
+    "中厚板": "https://zhb.100ppi.com/",
 }
 SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS = [
     "物料编码",
@@ -166,11 +166,44 @@ def _first_numeric_series(data: pd.DataFrame, *column_names: str) -> pd.Series:
 def _parse_price_quotes_from_html(html: str) -> list[float]:
     text = re.sub(r"\s+", " ", str(html or ""))
     values: list[float] = []
-    for match in re.finditer(r"(?<!\d)(\d{3,6}(?:\.\d+)?)\s*(?:元\s*/?\s*吨|元/吨)", text):
+    occupied_spans: list[tuple[int, int]] = []
+
+    def append_match(match: re.Match[str]) -> None:
         number = _coerce_float(match.group(1))
         if number is not None and 1000 <= number <= 20000:
             values.append(float(number))
+            occupied_spans.append(match.span())
+
+    for match in re.finditer(r"(?:参考价(?:格)?|均价|报价|价格)\s*(?:为|是|:|：)?\s*(\d{3,6}(?:\.\d+)?)", text):
+        append_match(match)
+
+    for match in re.finditer(r"(?<!\d)(\d{3,6}(?:\.\d+)?)\s*(?:元\s*/?\s*吨|元/吨)", text):
+        if any(match.start() < span_end and span_start < match.end() for span_start, span_end in occupied_spans):
+            continue
+        append_match(match)
     return values
+
+
+def _extract_100ppi_security_cookie(html: str) -> str | None:
+    if "HW_CHECK" not in str(html or ""):
+        return None
+    match = re.search(r"var\s+_0x2\s*=\s*['\"]([^'\"]+)['\"]", str(html or ""))
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _fetch_steel_market_html(source_url: str, *, session: Any, timeout: float) -> str:
+    response = session.get(source_url, timeout=timeout)
+    response.raise_for_status()
+    html = response.text
+    security_cookie = _extract_100ppi_security_cookie(html)
+    if security_cookie:
+        session.cookies.set("HW_CHECK", security_cookie, domain=".100ppi.com", path="/")
+        response = session.get(source_url, timeout=timeout)
+        response.raise_for_status()
+        html = response.text
+    return html
 
 
 def _normalize_quote_values(raw_quotes: Any) -> list[float]:
@@ -252,6 +285,8 @@ def load_sheet_metal_steel_market_anchor(
     *,
     as_of_date: datetime | pd.Timestamp | str | None = None,
     timeout: float = 5.0,
+    session_factory: Callable[[], Any] | None = None,
+    retries: int = 2,
 ) -> dict:
     """Load the steel market anchor from public pages, with manual prices as the stable fallback."""
     if manual_prices:
@@ -267,11 +302,42 @@ def load_sheet_metal_steel_market_anchor(
     categories: list[dict[str, Any]] = []
     try:
         import requests
+    except Exception as exc:
+        log_event("sheet_metal_steel_anchor", "fetch_failed", "Failed to import requests for public steel market anchor", error=str(exc))
+        requests = None  # type: ignore[assignment]
 
+    if requests is not None:
+        session = session_factory() if session_factory else requests.Session()
+        session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+        )
+        attempt_count = max(1, int(retries or 1))
         for category_name, source_url in _STEEL_MARKET_URLS.items():
-            response = requests.get(source_url, timeout=timeout)
-            response.raise_for_status()
-            quotes = _parse_price_quotes_from_html(response.text)
+            quotes: list[float] = []
+            last_error: Exception | None = None
+            for _ in range(attempt_count):
+                try:
+                    html = _fetch_steel_market_html(source_url, session=session, timeout=timeout)
+                    quotes = _parse_price_quotes_from_html(html)
+                    if quotes:
+                        break
+                except Exception as exc:
+                    last_error = exc
+            if not quotes and last_error is not None:
+                log_event(
+                    "sheet_metal_steel_anchor",
+                    "category_fetch_failed",
+                    "Failed to fetch public steel market category",
+                    steel_category=category_name,
+                    source=source_url,
+                    error=str(last_error),
+                )
             if quotes:
                 categories.append(
                     {
@@ -281,8 +347,6 @@ def load_sheet_metal_steel_market_anchor(
                         "date": str(pd.Timestamp(as_of_date or datetime.now()).date()),
                     }
                 )
-    except Exception as exc:
-        log_event("sheet_metal_steel_anchor", "fetch_failed", "Failed to fetch public steel market anchor", error=str(exc))
 
     source = "public_web" if categories else "manual_required"
     return _normalize_steel_market_anchor(
