@@ -62,6 +62,7 @@ from llm_engine import (
 )
 from page_ui_helpers import get_vehicle_market_price_manual_editable_columns
 import sheet_metal_logic
+import sheet_metal_ui
 from sheet_metal_logic import (
     build_sheet_metal_audit_report,
     build_sheet_metal_calibration_management_df,
@@ -2141,6 +2142,9 @@ class DgbMultiRingTests(unittest.TestCase):
         missing_anchor = calculator(builder(review_df), {"categories": []})
         self.assertTrue(missing_anchor.empty)
         self.assertEqual(missing_anchor.attrs["excluded_summary"]["steel_anchor_missing"], 5)
+
+    def test_sheet_metal_non_material_coefficients_page_renderer_exists(self) -> None:
+        self.assertTrue(callable(getattr(sheet_metal_ui, "render_sheet_metal_non_material_coefficients_page", None)))
 
     def test_cost_anomaly_chart_scope_uses_multi_selected_short_names(self) -> None:
         working_df = pd.DataFrame(

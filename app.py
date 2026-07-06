@@ -18,7 +18,11 @@ from general_pages import (
     render_vehicle_gradient_compare_page,
     render_vehicle_rank_config_page,
 )
-from sheet_metal_ui import render_sheet_metal_review_page, render_sheet_metal_skills_page
+from sheet_metal_ui import (
+    render_sheet_metal_non_material_coefficients_page,
+    render_sheet_metal_review_page,
+    render_sheet_metal_skills_page,
+)
 
 
 st.set_page_config(
@@ -40,6 +44,7 @@ BOARD_PAGES = [
 ANOMALY_PAGES = [
     ("成本异常监控", "📌 成本异常监控", render_cost_anomaly_page),
     ("钣金件白痴指数复核", "🧩 钣金件白痴指数复核", render_sheet_metal_review_page),
+    ("钣金件非材料成本系数", "🧮 钣金件非材料成本系数", render_sheet_metal_non_material_coefficients_page),
 ]
 
 SKILLS_PAGES = [

@@ -3,9 +3,10 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,34 @@ from storage_service import split_metric_record_key
 
 _STEEL_DENSITY = 7.6
 _EXCEL_PATTERNS = ("*.xlsx", "*.xls", "*.xlsm")
+_STEEL_MARKET_CATEGORIES = ("热轧板卷", "冷轧板", "镀锌板", "中厚板")
+_STEEL_MARKET_URLS = {
+    "热轧板卷": "https://rejuan.100ppi.com/",
+    "冷轧板": "https://lyb.100ppi.com/",
+    "镀锌板": "https://dxb.100ppi.com/",
+    "中厚板": "https://steel.100ppi.com/",
+}
+SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS = [
+    "物料编码",
+    "物料名称",
+    "备件简称",
+    "样本数",
+    "材料锚点",
+    "材料时令价格",
+    "成本",
+    "重量",
+    "白痴指数",
+    "非材料成本系数",
+]
+_NON_MATERIAL_EXCLUDE_KEYS = [
+    "not_reasonable",
+    "cost_missing",
+    "weight_missing",
+    "weight_invalid",
+    "steel_anchor_missing",
+    "material_cost_invalid",
+    "short_name_missing",
+]
 _COLUMN_ALIASES = {
     "车型": ["车型"],
     "物料编码": ["物料编码", "物料号", "料号", "零件号", "零件编码"],
@@ -93,6 +122,265 @@ def _compute_sheet_metal_index(data: pd.DataFrame) -> pd.DataFrame:
     computed_index = result["出厂单价"] / denominator.replace(0, pd.NA)
     fill_mask = result["白痴指数"].isna() & computed_index.notna()
     result.loc[fill_mask, "白痴指数"] = computed_index.loc[fill_mask]
+    return result
+
+
+def _empty_non_material_result(summary: dict[str, int] | None = None) -> pd.DataFrame:
+    result = pd.DataFrame(columns=SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS)
+    base_summary = {key: 0 for key in _NON_MATERIAL_EXCLUDE_KEYS}
+    if summary:
+        for key, value in summary.items():
+            base_summary[str(key)] = int(value or 0)
+    result.attrs["excluded_summary"] = base_summary
+    return result
+
+
+def _coerce_float(value: Any) -> float | None:
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(number):
+        return None
+    try:
+        number = float(number)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(number):
+        return None
+    return number
+
+
+def _coerce_numeric_series(data: pd.DataFrame, column_name: str) -> pd.Series:
+    if column_name not in data.columns:
+        return pd.Series(np.nan, index=data.index, dtype="float64")
+    return pd.to_numeric(data[column_name], errors="coerce")
+
+
+def _first_numeric_series(data: pd.DataFrame, *column_names: str) -> pd.Series:
+    result = pd.Series(np.nan, index=data.index, dtype="float64")
+    for column_name in column_names:
+        candidate = _coerce_numeric_series(data, column_name)
+        result = result.where(result.notna(), candidate)
+    return result
+
+
+def _parse_price_quotes_from_html(html: str) -> list[float]:
+    text = re.sub(r"\s+", " ", str(html or ""))
+    values: list[float] = []
+    for match in re.finditer(r"(?<!\d)(\d{3,6}(?:\.\d+)?)\s*(?:元\s*/?\s*吨|元/吨)", text):
+        number = _coerce_float(match.group(1))
+        if number is not None and 1000 <= number <= 20000:
+            values.append(float(number))
+    return values
+
+
+def _normalize_quote_values(raw_quotes: Any) -> list[float]:
+    if raw_quotes is None:
+        return []
+    if isinstance(raw_quotes, (str, bytes)):
+        raw_iterable = [raw_quotes]
+    elif isinstance(raw_quotes, Iterable):
+        raw_iterable = list(raw_quotes)
+    else:
+        raw_iterable = [raw_quotes]
+
+    values: list[float] = []
+    for item in raw_iterable:
+        number = _coerce_float(item)
+        if number is not None and number > 0:
+            values.append(float(number))
+    return values
+
+
+def _normalize_steel_market_anchor(steel_anchor: dict | None) -> dict:
+    payload = dict(steel_anchor or {})
+    raw_categories = payload.get("categories") or payload.get("钢材大类") or []
+    normalized_categories: list[dict[str, Any]] = []
+
+    if isinstance(raw_categories, dict):
+        category_items = [{"category": key, "quotes": value} for key, value in raw_categories.items()]
+    else:
+        category_items = list(raw_categories or [])
+
+    for item in category_items:
+        if not isinstance(item, dict):
+            continue
+        category_name = str(item.get("category") or item.get("name") or item.get("大类") or item.get("钢材大类") or "").strip()
+        quotes = _normalize_quote_values(
+            item.get("quotes")
+            or item.get("报价")
+            or item.get("价格列表")
+            or item.get("均价")
+            or item.get("average")
+            or item.get("price")
+            or item.get("价格")
+        )
+        if not category_name or not quotes:
+            continue
+        category_average = float(np.mean(quotes))
+        normalized_categories.append(
+            {
+                "category": category_name,
+                "quotes": quotes,
+                "average": round(category_average, 4),
+                "source": item.get("source") or item.get("来源") or payload.get("source") or "",
+                "date": item.get("date") or item.get("日期") or payload.get("date") or "",
+            }
+        )
+
+    explicit_average = _coerce_float(
+        payload.get("average_price_per_ton")
+        or payload.get("材料时令价格")
+        or payload.get("均价")
+        or payload.get("price_per_ton")
+    )
+    category_average_values = [float(item["average"]) for item in normalized_categories]
+    average_price = float(np.mean(category_average_values)) if category_average_values else explicit_average
+    anchor_categories = [item["category"] for item in normalized_categories] or list(_STEEL_MARKET_CATEGORIES)
+
+    normalized = {
+        "categories": normalized_categories,
+        "source": str(payload.get("source") or payload.get("来源") or "").strip(),
+        "date": str(payload.get("date") or payload.get("日期") or "").strip(),
+        "average_price_per_ton": round(float(average_price), 4) if average_price is not None and average_price > 0 else None,
+        "anchor_label": payload.get("anchor_label") or payload.get("材料锚点") or f"钢材均价锚点：{'/'.join(anchor_categories)}",
+    }
+    return normalized
+
+
+def load_sheet_metal_steel_market_anchor(
+    manual_prices: dict[str, Any] | None = None,
+    *,
+    as_of_date: datetime | pd.Timestamp | str | None = None,
+    timeout: float = 5.0,
+) -> dict:
+    """Load the steel market anchor from public pages, with manual prices as the stable fallback."""
+    if manual_prices:
+        categories = [{"category": name, "quotes": values, "source": "manual"} for name, values in manual_prices.items()]
+        return _normalize_steel_market_anchor(
+            {
+                "categories": categories,
+                "source": "manual",
+                "date": str(pd.Timestamp(as_of_date or datetime.now()).date()),
+            }
+        )
+
+    categories: list[dict[str, Any]] = []
+    try:
+        import requests
+
+        for category_name, source_url in _STEEL_MARKET_URLS.items():
+            response = requests.get(source_url, timeout=timeout)
+            response.raise_for_status()
+            quotes = _parse_price_quotes_from_html(response.text)
+            if quotes:
+                categories.append(
+                    {
+                        "category": category_name,
+                        "quotes": quotes,
+                        "source": source_url,
+                        "date": str(pd.Timestamp(as_of_date or datetime.now()).date()),
+                    }
+                )
+    except Exception as exc:
+        log_event("sheet_metal_steel_anchor", "fetch_failed", "Failed to fetch public steel market anchor", error=str(exc))
+
+    source = "public_web" if categories else "manual_required"
+    return _normalize_steel_market_anchor(
+        {
+            "categories": categories,
+            "source": source,
+            "date": str(pd.Timestamp(as_of_date or datetime.now()).date()),
+        }
+    )
+
+
+def build_reasonable_sheet_metal_samples(review_df: pd.DataFrame) -> pd.DataFrame:
+    if review_df is None or review_df.empty:
+        return _empty_non_material_result()
+
+    data = review_df.copy()
+    if "status" not in data.columns:
+        data["status"] = ""
+    for column_name in ["白痴指数", "合理下限", "合理上限"]:
+        data[column_name] = _coerce_numeric_series(data, column_name)
+
+    status_normal = data["status"].astype(str).str.contains("正常", na=False)
+    in_bounds = data["白痴指数"].notna() & data["合理下限"].notna() & data["合理上限"].notna()
+    in_bounds &= data["白痴指数"].between(data["合理下限"], data["合理上限"], inclusive="both")
+    reasonable_mask = status_normal | in_bounds
+
+    samples = data[reasonable_mask].copy()
+    samples.attrs["excluded_summary"] = {"not_reasonable": int((~reasonable_mask).sum())}
+    return samples
+
+
+def calculate_non_material_coefficients(samples_df: pd.DataFrame, steel_anchor: dict | None) -> pd.DataFrame:
+    if samples_df is None or samples_df.empty:
+        summary = dict(getattr(samples_df, "attrs", {}).get("excluded_summary", {}) if samples_df is not None else {})
+        return _empty_non_material_result(summary)
+
+    data = samples_df.copy()
+    summary = {key: 0 for key in _NON_MATERIAL_EXCLUDE_KEYS}
+    summary.update({str(key): int(value or 0) for key, value in (samples_df.attrs.get("excluded_summary") or {}).items()})
+    normalized_anchor = _normalize_steel_market_anchor(steel_anchor)
+    material_price_per_ton = _coerce_float(normalized_anchor.get("average_price_per_ton"))
+    if material_price_per_ton is None or material_price_per_ton <= 0:
+        summary["steel_anchor_missing"] += int(len(data))
+        return _empty_non_material_result(summary)
+
+    if "物料名称" not in data.columns and "物料描述" in data.columns:
+        data["物料名称"] = data["物料描述"]
+    for column_name in ["物料编码", "物料名称", "备件简称"]:
+        if column_name not in data.columns:
+            data[column_name] = ""
+
+    data["成本"] = _first_numeric_series(data, "出厂单价", "产品成本")
+    data["重量"] = _first_numeric_series(data, "净重", "包装后重量")
+    data["白痴指数"] = _coerce_numeric_series(data, "白痴指数")
+    short_names = _clean_text_series(data["备件简称"])
+
+    cost_missing = data["成本"].isna()
+    weight_missing = data["重量"].isna()
+    weight_invalid = data["重量"].notna() & data["重量"].le(0)
+    short_name_missing = short_names.isna()
+
+    material_price_per_kg = float(material_price_per_ton) / 1000.0
+    material_cost = (data["重量"] / 1000.0) * material_price_per_kg
+    material_cost_invalid = material_cost.isna() | material_cost.le(0)
+
+    invalid_mask = cost_missing | weight_missing | weight_invalid | short_name_missing | material_cost_invalid
+    summary["cost_missing"] += int(cost_missing.sum())
+    summary["weight_missing"] += int(weight_missing.sum())
+    summary["weight_invalid"] += int(weight_invalid.sum())
+    summary["short_name_missing"] += int(short_name_missing.sum())
+    summary["material_cost_invalid"] += int((material_cost_invalid & ~weight_missing & ~weight_invalid).sum())
+
+    valid_data = data[~invalid_mask].copy()
+    if valid_data.empty:
+        return _empty_non_material_result(summary)
+
+    valid_material_cost = material_cost.loc[valid_data.index].astype(float)
+    valid_data["备件简称"] = short_names.loc[valid_data.index].astype(str)
+    valid_data["_单行非材料成本系数"] = (valid_data["成本"].astype(float) / valid_material_cost) - 1.0
+    group_coefficients = valid_data.groupby("备件简称")["_单行非材料成本系数"].transform("mean")
+    group_sample_counts = valid_data.groupby("备件简称")["备件简称"].transform("size")
+
+    result = pd.DataFrame(
+        {
+            "物料编码": valid_data["物料编码"].astype(str),
+            "物料名称": _first_nonempty_text_series(valid_data, "物料名称", "物料描述", default=""),
+            "备件简称": valid_data["备件简称"].astype(str),
+            "样本数": group_sample_counts.astype(int),
+            "材料锚点": str(normalized_anchor.get("anchor_label") or f"钢材均价锚点：{'/'.join(_STEEL_MARKET_CATEGORIES)}"),
+            "材料时令价格": round(float(material_price_per_ton), 4),
+            "成本": valid_data["成本"].astype(float).round(4),
+            "重量": valid_data["重量"].astype(float).round(4),
+            "白痴指数": valid_data["白痴指数"].astype(float).round(4),
+            "非材料成本系数": group_coefficients.astype(float).round(6),
+        }
+    )
+    result = result[SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS].reset_index(drop=True)
+    result.attrs["excluded_summary"] = summary
+    result.attrs["steel_anchor"] = normalized_anchor
     return result
 
 

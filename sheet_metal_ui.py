@@ -28,6 +28,19 @@ from storage_service import find_feedback_rows_missing_required_remarks
 
 
 SHEET_METAL_SKILL_DOMAIN = "sheet_metal"
+_NON_MATERIAL_ANCHOR_STATE_KEY = "sheet_metal_non_material_active_anchor"
+_NON_MATERIAL_RESULT_STATE_KEY = "sheet_metal_non_material_result"
+_NON_MATERIAL_REVIEW_STATE_KEY = "sheet_metal_non_material_review"
+_NON_MATERIAL_SCOPE_STATE_KEY = "sheet_metal_non_material_scope"
+_NON_MATERIAL_EXCLUSION_LABELS = {
+    "not_reasonable": "白痴指数不合理",
+    "cost_missing": "成本缺失",
+    "weight_missing": "重量缺失",
+    "weight_invalid": "重量小于等于0",
+    "steel_anchor_missing": "钢价锚点缺失",
+    "material_cost_invalid": "材料成本无效",
+    "short_name_missing": "备件简称缺失",
+}
 
 
 def _sheet_metal_skills_fingerprint(skills: list[dict]) -> str:
@@ -189,6 +202,65 @@ def _get_sheet_metal_source() -> tuple[pd.DataFrame | None, str | None]:
 def reset_sheet_metal_review_compute_filters() -> None:
     st.session_state["sheet_metal_review_compute_short_names"] = []
     st.session_state.pop("sheet_metal_review_active_run_request", None)
+
+
+def reset_sheet_metal_non_material_state() -> None:
+    st.session_state["sheet_metal_non_material_short_names"] = []
+    for key in [_NON_MATERIAL_RESULT_STATE_KEY, _NON_MATERIAL_REVIEW_STATE_KEY, _NON_MATERIAL_SCOPE_STATE_KEY]:
+        st.session_state.pop(key, None)
+
+
+def _parse_manual_steel_price_values(raw_text: object) -> list[float]:
+    values: list[float] = []
+    for token in re.findall(r"\d+(?:\.\d+)?", str(raw_text or "")):
+        number = pd.to_numeric(pd.Series([token]), errors="coerce").iloc[0]
+        if pd.notna(number):
+            value = float(number)
+            if 1000 <= value <= 20000:
+                values.append(value)
+    return values
+
+
+def _build_manual_steel_prices_from_state() -> dict[str, list[float]]:
+    manual_prices: dict[str, list[float]] = {}
+    for category_name in sheet_metal_logic._STEEL_MARKET_CATEGORIES:
+        values = _parse_manual_steel_price_values(st.session_state.get(f"sheet_metal_manual_steel_{category_name}", ""))
+        if values:
+            manual_prices[category_name] = values
+    return manual_prices
+
+
+def _render_non_material_anchor_summary(anchor: dict | None) -> None:
+    if not anchor or not anchor.get("average_price_per_ton"):
+        st.info("当前未设置有效钢材锚点。")
+        return
+
+    categories = anchor.get("categories") or []
+    anchor_cols = st.columns(3)
+    anchor_cols[0].metric("材料时令价格", f"{float(anchor['average_price_per_ton']):,.2f} 元/吨")
+    anchor_cols[1].metric("钢材大类数", f"{len(categories)}")
+    anchor_cols[2].metric("锚点日期", str(anchor.get("date") or "未记录"))
+
+    if categories:
+        anchor_df = pd.DataFrame(categories)
+        display_cols = [column for column in ["category", "average", "source", "date"] if column in anchor_df.columns]
+        anchor_df = anchor_df[display_cols].rename(
+            columns={"category": "钢材大类", "average": "大类均价", "source": "来源", "date": "日期"}
+        )
+        with st.expander("查看钢价锚点明细", expanded=False):
+            render_standard_data_editor(anchor_df, "sheet_metal_non_material_anchor_detail", max_height=220)
+
+
+def _render_non_material_exclusion_summary(summary: dict | None) -> None:
+    summary = summary or {}
+    rows = [
+        {"排除原因": _NON_MATERIAL_EXCLUSION_LABELS.get(key, key), "数量": int(summary.get(key, 0) or 0)}
+        for key in _NON_MATERIAL_EXCLUSION_LABELS
+        if int(summary.get(key, 0) or 0) > 0
+    ]
+    if rows:
+        st.markdown("#### 排除统计")
+        render_standard_data_editor(pd.DataFrame(rows), "sheet_metal_non_material_exclusion_summary", max_height=240)
 
 
 def _render_sheet_metal_histogram(chart_df: pd.DataFrame, chart_title: str) -> None:
@@ -723,6 +795,203 @@ def render_sheet_metal_review_page() -> None:
 
     chart_title = "全部备件简称 - 白痴指数分布" if selected_short_name == "全部" else f"{selected_short_name} - 白痴指数分布"
     _render_sheet_metal_histogram(filtered_df, chart_title)
+
+
+def render_sheet_metal_non_material_coefficients_page() -> None:
+    inject_css(is_overview=False)
+    _inject_sheet_metal_table_css()
+    st.title("🧮 钣金件非材料成本系数")
+    st.caption("基于钢材大类时令价锚点和钣金白痴指数合理样本，反推备件简称级非材料成本系数。")
+
+    base_df, error_message = _get_sheet_metal_source()
+    if error_message:
+        st.warning(error_message)
+        return
+    if base_df is None or base_df.empty:
+        st.info("当前钣金件基础数据为空。")
+        return
+
+    st.markdown("### 材料锚点")
+    anchor_date = st.date_input("锚点日期", value=datetime.now().date(), key="sheet_metal_non_material_anchor_date")
+    anchor_cols = st.columns(4)
+    for index, category_name in enumerate(sheet_metal_logic._STEEL_MARKET_CATEGORIES):
+        with anchor_cols[index % len(anchor_cols)]:
+            st.text_input(
+                f"{category_name}（元/吨）",
+                key=f"sheet_metal_manual_steel_{category_name}",
+                placeholder="可录入多个报价，用逗号分隔",
+            )
+
+    manual_prices = _build_manual_steel_prices_from_state()
+    fetch_col, manual_col, clear_col = st.columns([1.4, 1.4, 1], vertical_alignment="bottom")
+    with fetch_col:
+        fetch_clicked = st.button("抓取公开钢价", key="sheet_metal_fetch_public_steel_anchor", width="stretch")
+    with manual_col:
+        manual_clicked = st.button("使用手动钢价", key="sheet_metal_use_manual_steel_anchor", width="stretch")
+    with clear_col:
+        clear_clicked = st.button("清空结果", key="sheet_metal_non_material_clear", width="stretch")
+
+    if clear_clicked:
+        st.session_state.pop(_NON_MATERIAL_ANCHOR_STATE_KEY, None)
+        reset_sheet_metal_non_material_state()
+        st.rerun()
+
+    if fetch_clicked:
+        with st.spinner("正在抓取公开钢价..."):
+            anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(as_of_date=anchor_date)
+        st.session_state[_NON_MATERIAL_ANCHOR_STATE_KEY] = anchor
+        if anchor.get("average_price_per_ton"):
+            st.success("已更新公开钢价锚点。")
+        else:
+            st.warning("公开钢价抓取未得到有效均价，请使用手动钢价。")
+
+    if manual_clicked:
+        if not manual_prices:
+            st.warning("请至少录入一个有效钢材大类价格。")
+        else:
+            st.session_state[_NON_MATERIAL_ANCHOR_STATE_KEY] = sheet_metal_logic.load_sheet_metal_steel_market_anchor(
+                manual_prices=manual_prices,
+                as_of_date=anchor_date,
+            )
+            st.success("已使用手动钢价锚点。")
+
+    active_anchor = st.session_state.get(_NON_MATERIAL_ANCHOR_STATE_KEY)
+    if not active_anchor and manual_prices:
+        active_anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(manual_prices=manual_prices, as_of_date=anchor_date)
+    _render_non_material_anchor_summary(active_anchor)
+
+    st.markdown("---")
+    st.markdown("### 测算范围")
+
+    skills_data, skills_snapshot_exists, skills_overrides_json = _load_sheet_metal_skills_snapshot()
+    skills_loaded = bool(skills_data and skills_data.get("skills"))
+    current_sigma = float((skills_data or {}).get("global_sigma") or 1.0)
+    current_weight = int((skills_data or {}).get("global_weight") or _EXPERT_WEIGHT)
+    label_details = harness.execute_action("get_sheet_metal_feedback_details")
+    label_statuses = {record_key: payload.get("label", "") for record_key, payload in label_details.items()}
+
+    mode_col, calc_col = st.columns([3, 1.4], vertical_alignment="bottom")
+    with mode_col:
+        st.radio(
+            "测算模式",
+            options=["原始测算", "优化后测算（专家纠偏）"],
+            key="sheet_metal_non_material_mode",
+            horizontal=True,
+        )
+    with calc_col:
+        calculate_clicked = st.button("计算非材料成本系数", type="primary", key="sheet_metal_non_material_calculate", width="stretch")
+
+    if skills_loaded:
+        st.info(f"已加载数据库中的最新钣金指数技能书，当前测算会应用已保存的个性化边界。")
+    elif skills_data is None and skills_snapshot_exists:
+        st.warning("钣金指数技能书快照读取异常，当前已回退到默认算法。")
+
+    short_name_options = sorted(base_df["备件简称"].dropna().astype(str).unique().tolist()) if "备件简称" in base_df.columns else []
+    filter_col, reset_col = st.columns([5, 1], vertical_alignment="bottom")
+    with filter_col:
+        selected_short_names = st.multiselect(
+            "备件简称筛选（不选择则全量）",
+            options=short_name_options,
+            key="sheet_metal_non_material_short_names",
+        )
+    with reset_col:
+        st.button(
+            "重置",
+            key="sheet_metal_non_material_reset",
+            width="stretch",
+            on_click=reset_sheet_metal_non_material_state,
+        )
+
+    if calculate_clicked:
+        if not active_anchor or not active_anchor.get("average_price_per_ton"):
+            st.warning("请先抓取或录入有效钢材锚点。")
+        else:
+            compute_source_df = base_df.copy()
+            if selected_short_names:
+                selected_set = set(map(str, selected_short_names))
+                compute_source_df = compute_source_df[compute_source_df["备件简称"].astype(str).isin(selected_set)].copy()
+
+            if compute_source_df.empty:
+                st.warning("当前测算范围为空，请调整备件简称。")
+            else:
+                is_expert_mode = st.session_state.sheet_metal_non_material_mode == "优化后测算（专家纠偏）"
+                active_labels_tuple = tuple(sorted(label_statuses.items())) if is_expert_mode and bool(label_statuses) else tuple()
+                with st.spinner("正在计算非材料成本系数..."):
+                    review_df = _cached_detect_sheet_metal_anomalies(
+                        compute_source_df,
+                        active_labels_tuple,
+                        is_expert_mode and bool(label_statuses),
+                        get_sheet_metal_refresh_token(),
+                        current_sigma,
+                        current_weight,
+                        skills_overrides_json,
+                    )
+                    samples_df = sheet_metal_logic.build_reasonable_sheet_metal_samples(review_df)
+                    result_df = sheet_metal_logic.calculate_non_material_coefficients(samples_df, active_anchor)
+
+                scope_label = "全量简称" if not selected_short_names else f"所选{len(selected_short_names)}个简称"
+                st.session_state[_NON_MATERIAL_RESULT_STATE_KEY] = result_df
+                st.session_state[_NON_MATERIAL_REVIEW_STATE_KEY] = review_df
+                st.session_state[_NON_MATERIAL_SCOPE_STATE_KEY] = scope_label
+
+    result_df = st.session_state.get(_NON_MATERIAL_RESULT_STATE_KEY)
+    review_df = st.session_state.get(_NON_MATERIAL_REVIEW_STATE_KEY)
+    scope_label = st.session_state.get(_NON_MATERIAL_SCOPE_STATE_KEY) or "未测算"
+
+    if result_df is None:
+        st.info("初始状态不会进行钣金非材料成本系数测算。")
+        return
+
+    summary = result_df.attrs.get("excluded_summary", {}) if isinstance(result_df, pd.DataFrame) else {}
+    valid_count = len(result_df) if isinstance(result_df, pd.DataFrame) else 0
+    reasonable_count = int(len(sheet_metal_logic.build_reasonable_sheet_metal_samples(review_df))) if isinstance(review_df, pd.DataFrame) else 0
+    excluded_total = int(sum(int(value or 0) for value in summary.values()))
+
+    st.markdown("### 测算结果")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("测算范围", str(scope_label))
+    metric_cols[1].metric("合理样本数", f"{reasonable_count}")
+    metric_cols[2].metric("有效输出行", f"{valid_count}")
+    metric_cols[3].metric("排除数量", f"{excluded_total}")
+
+    _render_non_material_exclusion_summary(summary)
+
+    if result_df.empty:
+        st.warning("当前没有可输出的非材料成本系数结果。")
+        return
+
+    preview_df, visible_columns = prepare_table_view(
+        result_df,
+        "sheet_metal_non_material_coefficients",
+        display_columns=sheet_metal_logic.SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS,
+        default_search_columns=["物料编码", "物料名称", "备件简称"],
+        filter_title="钣金件非材料成本系数",
+    )
+    render_standard_data_editor(
+        preview_df[visible_columns],
+        "sheet_metal_non_material_coefficients",
+        column_config={
+            "样本数": st.column_config.NumberColumn("样本数", disabled=True),
+            "材料时令价格": st.column_config.NumberColumn("材料时令价格", disabled=True, format="%.2f"),
+            "成本": st.column_config.NumberColumn("成本", disabled=True, format="%.4f"),
+            "重量": st.column_config.NumberColumn("重量", disabled=True, format="%.4f"),
+            "白痴指数": st.column_config.NumberColumn("白痴指数", disabled=True, format="%.4f"),
+            "非材料成本系数": st.column_config.NumberColumn("非材料成本系数", disabled=True, format="%.6f"),
+        },
+        max_height=520,
+    )
+
+    export_name = f"钣金件非材料成本系数_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    render_deferred_download_button(
+        label="下载钣金件非材料成本系数",
+        prepare_label="准备导出钣金件非材料成本系数",
+        data_builder=lambda export_frame=result_df.copy(): to_excel_bytes(export_frame, sheet_name="非材料成本系数"),
+        file_name=export_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="sheet_metal_non_material_export",
+        fingerprint=dataframe_export_fingerprint(result_df),
+        width="stretch",
+    )
 
 
 def render_sheet_metal_skills_page() -> None:
