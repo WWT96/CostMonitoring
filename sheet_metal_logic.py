@@ -6,13 +6,12 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from anomaly_engine import _EXPERT_WEIGHT, detect_dgb_anomalies, detect_dgb_anomalies_weighted
-import harness
 from local_logging import log_event
 from skills_excel_export import flatten_skills_for_excel, skills_to_excel_bytes as _skills_to_excel_bytes
 from storage_service import split_metric_record_key
@@ -207,248 +206,6 @@ def _fetch_steel_market_html(source_url: str, *, session: Any, timeout: float) -
     return html
 
 
-def _build_steel_market_llm_messages(as_of_date: datetime | pd.Timestamp | str | None = None) -> list[dict[str, str]]:
-    anchor_date = str(pd.Timestamp(as_of_date or datetime.now()).date())
-    user_prompt = json.dumps(
-        {
-            "task": "请检索或估算锚点日期附近中国市场公开钢材现货均价，用于钣金件材料成本锚点测试。",
-            "anchor_date": anchor_date,
-            "steel_categories": list(_STEEL_MARKET_CATEGORIES),
-            "requirements": [
-                "必须覆盖全部钢材大类，每个大类输出一条记录。",
-                "price_per_ton 必须是元/吨数值，不要写区间，不要留空。",
-                "source 或 basis 写明依据，confidence 表示你对该结果的信心。",
-                "只返回 JSON，不要附加解释文字。",
-            ],
-            "output_schema": [
-                "category",
-                "price_per_ton",
-                "date",
-                "source",
-                "basis",
-                "confidence",
-            ],
-        },
-        ensure_ascii=False,
-    )
-    return [
-        {
-            "role": "system",
-            "content": "你只返回 JSON。你是钢材公开行情助手，输出单位统一为元/吨。",
-        },
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def _extract_json_payload_from_text(raw_text: str) -> Any:
-    text = str(raw_text or "").strip()
-    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.S)
-    if fence_match:
-        text = fence_match.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        object_start = text.find("{")
-        array_start = text.find("[")
-        candidates = [index for index in [object_start, array_start] if index >= 0]
-        if not candidates:
-            raise
-        start = min(candidates)
-        end_char = "}" if text[start] == "{" else "]"
-        end = text.rfind(end_char)
-        if end > start:
-            return json.loads(text[start : end + 1])
-        raise
-
-
-def _normalize_steel_market_category_name(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    compact_text = re.sub(r"\s+", "", text)
-    for category_name in _STEEL_MARKET_CATEGORIES:
-        if category_name in compact_text:
-            return category_name
-    synonym_map = {
-        "热轧": "热轧板卷",
-        "热卷": "热轧板卷",
-        "冷轧": "冷轧板",
-        "冷板": "冷轧板",
-        "镀锌": "镀锌板",
-        "中厚": "中厚板",
-        "中板": "中厚板",
-    }
-    for keyword, category_name in synonym_map.items():
-        if keyword in compact_text:
-            return category_name
-    return text if text in _STEEL_MARKET_CATEGORIES else ""
-
-
-def _coerce_llm_steel_market_items(parsed_payload: Any, *, model_name: str, as_of_date: str) -> list[dict[str, Any]]:
-    if isinstance(parsed_payload, dict):
-        raw_items = (
-            parsed_payload.get("categories")
-            or parsed_payload.get("items")
-            or parsed_payload.get("data")
-            or parsed_payload.get("result")
-            or parsed_payload.get("钢材大类")
-        )
-        if raw_items is None:
-            raw_items = []
-            for raw_key, raw_value in parsed_payload.items():
-                category_name = _normalize_steel_market_category_name(raw_key)
-                if not category_name:
-                    continue
-                if isinstance(raw_value, dict):
-                    item = dict(raw_value)
-                    item.setdefault("category", category_name)
-                else:
-                    item = {"category": category_name, "price_per_ton": raw_value}
-                raw_items.append(item)
-    elif isinstance(parsed_payload, list):
-        raw_items = parsed_payload
-    else:
-        raw_items = []
-
-    details: list[dict[str, Any]] = []
-    for raw_item in raw_items:
-        if not isinstance(raw_item, dict):
-            continue
-        category_name = _normalize_steel_market_category_name(
-            raw_item.get("category")
-            or raw_item.get("steel_category")
-            or raw_item.get("name")
-            or raw_item.get("钢材大类")
-            or raw_item.get("品类")
-        )
-        price = _coerce_float(
-            raw_item.get("price_per_ton")
-            or raw_item.get("market_price_per_ton")
-            or raw_item.get("average_price_per_ton")
-            or raw_item.get("average")
-            or raw_item.get("price")
-            or raw_item.get("均价")
-            or raw_item.get("价格")
-            or raw_item.get("材料时令价格")
-        )
-        if not category_name or price is None or not (1000 <= price <= 20000):
-            continue
-        source = str(raw_item.get("source") or raw_item.get("source_url") or raw_item.get("来源") or "").strip()
-        basis = str(raw_item.get("basis") or raw_item.get("依据") or raw_item.get("说明") or "").strip()
-        details.append(
-            {
-                "model": str(model_name or "LLM").strip() or "LLM",
-                "category": category_name,
-                "price_per_ton": round(float(price), 4),
-                "source": source or basis or "LLM",
-                "date": str(raw_item.get("date") or raw_item.get("日期") or as_of_date),
-                "basis": basis,
-                "confidence": raw_item.get("confidence") or raw_item.get("置信度") or "",
-            }
-        )
-    return details
-
-
-def _post_steel_market_llm_completion(messages: list[dict[str, str]], config: dict[str, Any]) -> dict[str, Any]:
-    import requests
-    from config import settings
-    from llm_engine import _chat_completions_url, _messages_for_llm_config
-
-    payload = {
-        "model": config["model"],
-        "temperature": 0.0,
-        "messages": _messages_for_llm_config(messages, config),
-    }
-    headers = {
-        "Authorization": f"Bearer {config['api_key']}",
-        "Content-Type": "application/json",
-    }
-    response = requests.post(
-        _chat_completions_url(config),
-        headers=headers,
-        json=payload,
-        timeout=settings.llm_timeout_seconds,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def _load_sheet_metal_steel_market_anchor_from_llm(
-    *,
-    as_of_date: datetime | pd.Timestamp | str | None = None,
-    llm_configs: Sequence[dict[str, Any]] | None = None,
-    llm_completion_func: Callable[[list[dict[str, str]], dict[str, Any]], dict[str, Any]] | None = None,
-) -> dict:
-    from llm_engine import _iter_llm_api_configs
-
-    anchor_date = str(pd.Timestamp(as_of_date or datetime.now()).date())
-    configs = list(llm_configs) if llm_configs is not None else _iter_llm_api_configs()
-    messages = _build_steel_market_llm_messages(as_of_date)
-    completion_func = llm_completion_func or _post_steel_market_llm_completion
-    errors: list[dict[str, str]] = []
-
-    def _execute_request() -> list[dict[str, Any]]:
-        details: list[dict[str, Any]] = []
-        for config in configs:
-            model_name = str(config.get("name") or config.get("model") or "LLM").strip() or "LLM"
-            try:
-                response_json = completion_func(messages, config)
-                content = (
-                    response_json.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                )
-                if not content:
-                    raise ValueError("LLM 响应缺少 message.content")
-                parsed_payload = _extract_json_payload_from_text(content)
-                details.extend(_coerce_llm_steel_market_items(parsed_payload, model_name=model_name, as_of_date=anchor_date))
-            except Exception as exc:
-                errors.append({"model": model_name, "error": str(exc)})
-                log_event(
-                    "sheet_metal_steel_anchor",
-                    "llm_category_fetch_failed",
-                    "Failed to fetch steel market anchor from LLM",
-                    model=model_name,
-                    error=str(exc),
-                )
-        return details
-
-    if not configs:
-        return _normalize_steel_market_anchor({"categories": [], "source": "llm_required", "date": anchor_date})
-
-    model_details = harness.run_llm_action(
-        "sheet_metal_logic.load_sheet_metal_steel_market_anchor.llm",
-        _execute_request,
-        request_payload={"messages": messages, "models": [str(config.get("name") or config.get("model") or "LLM") for config in configs]},
-    )
-    categories: list[dict[str, Any]] = []
-    for category_name in _STEEL_MARKET_CATEGORIES:
-        category_details = [item for item in model_details if item.get("category") == category_name]
-        quotes = [float(item["price_per_ton"]) for item in category_details if _coerce_float(item.get("price_per_ton")) is not None]
-        if not quotes:
-            continue
-        model_names = sorted({str(item.get("model") or "LLM") for item in category_details})
-        categories.append(
-            {
-                "category": category_name,
-                "quotes": quotes,
-                "source": "LLM：" + " / ".join(model_names),
-                "date": anchor_date,
-            }
-        )
-    anchor = _normalize_steel_market_anchor(
-        {
-            "categories": categories,
-            "source": "llm",
-            "date": anchor_date,
-            "anchor_label": f"LLM钢材均价锚点：{'/'.join(_STEEL_MARKET_CATEGORIES)}",
-        }
-    )
-    anchor["model_details"] = model_details
-    anchor["llm_errors"] = errors
-    return anchor
-
-
 def _normalize_quote_values(raw_quotes: Any) -> list[float]:
     if raw_quotes is None:
         return []
@@ -527,12 +284,9 @@ def load_sheet_metal_steel_market_anchor(
     manual_prices: dict[str, Any] | None = None,
     *,
     as_of_date: datetime | pd.Timestamp | str | None = None,
-    source_mode: str = "public_web",
     timeout: float = 5.0,
     session_factory: Callable[[], Any] | None = None,
     retries: int = 2,
-    llm_configs: Sequence[dict[str, Any]] | None = None,
-    llm_completion_func: Callable[[list[dict[str, str]], dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict:
     """Load the steel market anchor from public pages, with manual prices as the stable fallback."""
     if manual_prices:
@@ -543,14 +297,6 @@ def load_sheet_metal_steel_market_anchor(
                 "source": "manual",
                 "date": str(pd.Timestamp(as_of_date or datetime.now()).date()),
             }
-        )
-
-    normalized_source_mode = str(source_mode or "public_web").strip().lower()
-    if normalized_source_mode in {"llm", "llm_search", "llm_test", "model", "模型"}:
-        return _load_sheet_metal_steel_market_anchor_from_llm(
-            as_of_date=as_of_date,
-            llm_configs=llm_configs,
-            llm_completion_func=llm_completion_func,
         )
 
     categories: list[dict[str, Any]] = []
