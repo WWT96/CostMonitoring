@@ -249,6 +249,26 @@ def _render_non_material_anchor_summary(anchor: dict | None) -> None:
         )
         with st.expander("查看钢价锚点明细", expanded=False):
             render_standard_data_editor(anchor_df, "sheet_metal_non_material_anchor_detail", max_height=220)
+            model_details = anchor.get("model_details") or []
+            if model_details:
+                detail_df = pd.DataFrame(model_details)
+                detail_cols = [
+                    column
+                    for column in ["model", "category", "price_per_ton", "source", "basis", "confidence", "date"]
+                    if column in detail_df.columns
+                ]
+                detail_df = detail_df[detail_cols].rename(
+                    columns={
+                        "model": "模型",
+                        "category": "钢材大类",
+                        "price_per_ton": "模型价格",
+                        "source": "来源",
+                        "basis": "依据",
+                        "confidence": "置信度",
+                        "date": "日期",
+                    }
+                )
+                render_standard_data_editor(detail_df, "sheet_metal_non_material_anchor_model_detail", max_height=260)
 
 
 def _render_non_material_exclusion_summary(summary: dict | None) -> None:
@@ -812,6 +832,14 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
         return
 
     st.markdown("### 材料锚点")
+    source_label = st.radio(
+        "钢价来源",
+        options=["LLM 检索测试", "生意社公开网页"],
+        index=0,
+        key="sheet_metal_non_material_anchor_source",
+        horizontal=True,
+    )
+    source_mode = "llm" if source_label == "LLM 检索测试" else "public_web"
     anchor_date = st.date_input("锚点日期", value=datetime.now().date(), key="sheet_metal_non_material_anchor_date")
     anchor_cols = st.columns(4)
     for index, category_name in enumerate(sheet_metal_logic._STEEL_MARKET_CATEGORIES):
@@ -825,7 +853,8 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
     manual_prices = _build_manual_steel_prices_from_state()
     fetch_col, manual_col, clear_col = st.columns([1.4, 1.4, 1], vertical_alignment="bottom")
     with fetch_col:
-        fetch_clicked = st.button("抓取公开钢价", key="sheet_metal_fetch_public_steel_anchor", width="stretch")
+        fetch_label = "用 LLM 检索钢价" if source_mode == "llm" else "抓取生意社钢价"
+        fetch_clicked = st.button(fetch_label, key="sheet_metal_fetch_public_steel_anchor", width="stretch")
     with manual_col:
         manual_clicked = st.button("使用手动钢价", key="sheet_metal_use_manual_steel_anchor", width="stretch")
     with clear_col:
@@ -837,13 +866,16 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
         st.rerun()
 
     if fetch_clicked:
-        with st.spinner("正在抓取公开钢价..."):
-            anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(as_of_date=anchor_date)
+        spinner_text = "正在调用已配置 LLM 检索钢价..." if source_mode == "llm" else "正在抓取生意社公开钢价..."
+        with st.spinner(spinner_text):
+            anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(as_of_date=anchor_date, source_mode=source_mode)
         st.session_state[_NON_MATERIAL_ANCHOR_STATE_KEY] = anchor
         if anchor.get("average_price_per_ton"):
-            st.success("已更新公开钢价锚点。")
+            success_text = "已更新 LLM 钢价锚点。" if source_mode == "llm" else "已更新生意社钢价锚点。"
+            st.success(success_text)
         else:
-            st.warning("公开钢价抓取未得到有效均价，请使用手动钢价。")
+            warning_text = "LLM 钢价检索未得到有效均价，请使用手动钢价或切回生意社公开网页。" if source_mode == "llm" else "生意社钢价抓取未得到有效均价，请使用手动钢价。"
+            st.warning(warning_text)
 
     if manual_clicked:
         if not manual_prices:

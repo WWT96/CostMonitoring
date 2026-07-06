@@ -2228,6 +2228,55 @@ class DgbMultiRingTests(unittest.TestCase):
 
         self.assertEqual(quotes, [3360.0])
 
+    def test_sheet_metal_llm_steel_anchor_queries_all_configs_and_keeps_model_details(self) -> None:
+        llm_configs = [
+            {"name": "Qwen3-14B", "model": "qwen", "api_key": "qwen-key", "base_url": "https://qwen.example"},
+            {"name": "DeepSeek", "model": "deepseek", "api_key": "deepseek-key", "base_url": "https://deepseek.example"},
+        ]
+        responses = {
+            "Qwen3-14B": {
+                "categories": [
+                    {"category": "热轧板卷", "price_per_ton": 3300, "source": "公开行情A", "basis": "热轧报价"},
+                    {"category": "冷轧板", "price_per_ton": 3700, "source": "公开行情A", "basis": "冷轧报价"},
+                    {"category": "镀锌板", "price_per_ton": 4300, "source": "公开行情A", "basis": "镀锌报价"},
+                    {"category": "中厚板", "price_per_ton": 3400, "source": "公开行情A", "basis": "中板报价"},
+                ]
+            },
+            "DeepSeek": {
+                "categories": [
+                    {"category": "热轧板卷", "price_per_ton": 3400, "source": "公开行情B", "basis": "热轧报价"},
+                    {"category": "冷轧板", "price_per_ton": 3800, "source": "公开行情B", "basis": "冷轧报价"},
+                    {"category": "镀锌板", "price_per_ton": 4400, "source": "公开行情B", "basis": "镀锌报价"},
+                    {"category": "中厚板", "price_per_ton": 3500, "source": "公开行情B", "basis": "中板报价"},
+                ]
+            },
+        }
+        called_models: list[str] = []
+
+        def fake_completion(messages, config):
+            serialized_prompt = json.dumps(messages, ensure_ascii=False)
+            self.assertIn("热轧板卷", serialized_prompt)
+            self.assertIn("price_per_ton", serialized_prompt)
+            called_models.append(config["name"])
+            return {"choices": [{"message": {"content": json.dumps(responses[config["name"]], ensure_ascii=False)}}]}
+
+        anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(
+            as_of_date="2026-07-06",
+            source_mode="llm",
+            llm_configs=llm_configs,
+            llm_completion_func=fake_completion,
+        )
+
+        self.assertEqual(called_models, ["Qwen3-14B", "DeepSeek"])
+        self.assertEqual(anchor["source"], "llm")
+        self.assertEqual([item["category"] for item in anchor["categories"]], ["热轧板卷", "冷轧板", "镀锌板", "中厚板"])
+        self.assertAlmostEqual(anchor["average_price_per_ton"], 3725.0)
+        self.assertEqual(len(anchor["model_details"]), 8)
+        self.assertEqual(
+            sorted({(item["model"], item["category"]) for item in anchor["model_details"] if item["category"] == "热轧板卷"}),
+            [("DeepSeek", "热轧板卷"), ("Qwen3-14B", "热轧板卷")],
+        )
+
     def test_cost_anomaly_chart_scope_uses_multi_selected_short_names(self) -> None:
         working_df = pd.DataFrame(
             [
