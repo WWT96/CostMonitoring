@@ -222,13 +222,22 @@ def _parse_manual_steel_price_values(raw_text: object) -> list[float]:
     return values
 
 
-def _build_manual_steel_prices_from_state() -> dict[str, list[float]]:
+def _build_manual_steel_prices_from_values(raw_values: dict[str, object]) -> dict[str, list[float]]:
     manual_prices: dict[str, list[float]] = {}
     for category_name in sheet_metal_logic._STEEL_MARKET_CATEGORIES:
-        values = _parse_manual_steel_price_values(st.session_state.get(f"sheet_metal_manual_steel_{category_name}", ""))
+        values = _parse_manual_steel_price_values(raw_values.get(category_name, ""))
         if values:
             manual_prices[category_name] = values
     return manual_prices
+
+
+def _build_manual_steel_prices_from_state() -> dict[str, list[float]]:
+    return _build_manual_steel_prices_from_values(
+        {
+            category_name: st.session_state.get(f"sheet_metal_manual_steel_{category_name}", "")
+            for category_name in sheet_metal_logic._STEEL_MARKET_CATEGORIES
+        }
+    )
 
 
 def build_sheet_metal_manual_steel_anchor_request(
@@ -867,18 +876,23 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
         st.session_state[_NON_MATERIAL_MANUAL_PANEL_STATE_KEY] = True
 
     save_manual_clicked = False
+    manual_input_values: dict[str, object] = {}
     if st.session_state.get(_NON_MATERIAL_MANUAL_PANEL_STATE_KEY, False):
         anchor_cols = st.columns(4)
         for index, category_name in enumerate(sheet_metal_logic._STEEL_MARKET_CATEGORIES):
             with anchor_cols[index % len(anchor_cols)]:
-                st.text_input(
+                manual_input_values[category_name] = st.text_input(
                     f"{category_name}（元/吨）",
                     key=f"sheet_metal_manual_steel_{category_name}",
                     placeholder="可录入多个报价，用逗号分隔",
                 )
         save_manual_clicked = st.button("保存手动钢价", key="sheet_metal_save_manual_steel_anchor", type="primary")
 
-    manual_prices = _build_manual_steel_prices_from_state()
+    manual_prices = (
+        _build_manual_steel_prices_from_values(manual_input_values)
+        if manual_input_values
+        else _build_manual_steel_prices_from_state()
+    )
     manual_request = build_sheet_metal_manual_steel_anchor_request(
         manual_panel_visible=bool(st.session_state.get(_NON_MATERIAL_MANUAL_PANEL_STATE_KEY, False)),
         open_manual_clicked=manual_clicked,
