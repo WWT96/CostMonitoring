@@ -47,6 +47,7 @@ _NON_MATERIAL_EXCLUDE_KEYS = [
     "material_cost_invalid",
     "short_name_missing",
 ]
+_SHEET_METAL_COST_WEIGHT_FIELDS = ["产品成本", "出厂单价", "净重", "包装后重量"]
 _COLUMN_ALIASES = {
     "车型": ["车型"],
     "物料编码": ["物料编码", "物料号", "料号", "零件号", "零件编码"],
@@ -384,6 +385,33 @@ def calculate_non_material_coefficients(samples_df: pd.DataFrame, steel_anchor: 
     return result
 
 
+def _append_sheet_metal_cost_weight_fields(result_df: pd.DataFrame, source_df: pd.DataFrame) -> pd.DataFrame:
+    if result_df is None or result_df.empty or source_df is None or source_df.empty:
+        return result_df
+    if "物料编码" not in result_df.columns or "物料编码" not in source_df.columns:
+        return result_df
+
+    source_columns = ["物料编码"] + [column for column in _SHEET_METAL_COST_WEIGHT_FIELDS if column in source_df.columns]
+    if len(source_columns) <= 1:
+        return result_df
+
+    source_lookup = source_df[source_columns].copy()
+    source_lookup["物料编码"] = source_lookup["物料编码"].astype(str)
+    source_lookup = source_lookup.drop_duplicates(subset=["物料编码"], keep="last")
+
+    data = result_df.copy()
+    data["物料编码"] = data["物料编码"].astype(str)
+    data = data.merge(source_lookup, on="物料编码", how="left", suffixes=("", "_源数据"))
+    for column_name in _SHEET_METAL_COST_WEIGHT_FIELDS:
+        source_column = f"{column_name}_源数据"
+        if column_name not in data.columns:
+            data[column_name] = np.nan
+        if source_column in data.columns:
+            data[column_name] = data[column_name].where(data[column_name].notna(), data[source_column])
+            data = data.drop(columns=[source_column])
+    return data
+
+
 def _normalize_sheet_frame(
     raw_df: pd.DataFrame,
     *,
@@ -531,7 +559,9 @@ def detect_sheet_metal_anomalies(
                 "工厂",
                 "备件简称",
                 "产品成本",
+                "出厂单价",
                 "包装费",
+                "净重",
                 "包装后重量",
                 "白痴指数",
                 "静态快照时间",
@@ -574,6 +604,7 @@ def detect_sheet_metal_anomalies(
         result_df["静态快照时间"] = pd.to_datetime(result_df["静态快照时间"], errors="coerce")
     if "_record_key" in result_df.columns:
         result_df["_record_key"] = result_df["_record_key"].astype(str)
+    result_df = _append_sheet_metal_cost_weight_fields(result_df, base_df)
     if "专家校准" not in result_df.columns:
         result_df["专家校准"] = ""
     if "判定依据" not in result_df.columns:
