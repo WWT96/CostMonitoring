@@ -878,15 +878,16 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
     save_manual_clicked = False
     manual_input_values: dict[str, object] = {}
     if st.session_state.get(_NON_MATERIAL_MANUAL_PANEL_STATE_KEY, False):
-        anchor_cols = st.columns(4)
-        for index, category_name in enumerate(sheet_metal_logic._STEEL_MARKET_CATEGORIES):
-            with anchor_cols[index % len(anchor_cols)]:
-                manual_input_values[category_name] = st.text_input(
-                    f"{category_name}（元/吨）",
-                    key=f"sheet_metal_manual_steel_{category_name}",
-                    placeholder="可录入多个报价，用逗号分隔",
-                )
-        save_manual_clicked = st.button("保存手动钢价", key="sheet_metal_save_manual_steel_anchor", type="primary")
+        with st.form("sheet_metal_manual_steel_anchor_form", clear_on_submit=False):
+            anchor_cols = st.columns(4)
+            for index, category_name in enumerate(sheet_metal_logic._STEEL_MARKET_CATEGORIES):
+                with anchor_cols[index % len(anchor_cols)]:
+                    manual_input_values[category_name] = st.text_input(
+                        f"{category_name}（元/吨）",
+                        key=f"sheet_metal_manual_steel_{category_name}",
+                        placeholder="可录入多个报价，用逗号分隔",
+                    )
+            save_manual_clicked = st.form_submit_button("保存手动钢价", type="primary")
 
     manual_prices = (
         _build_manual_steel_prices_from_values(manual_input_values)
