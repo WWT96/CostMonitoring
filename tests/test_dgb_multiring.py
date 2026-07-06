@@ -61,6 +61,7 @@ from llm_engine import (
     normalize_vehicle_market_price_result,
 )
 from page_ui_helpers import get_vehicle_market_price_manual_editable_columns
+import sheet_metal_logic
 from sheet_metal_logic import (
     build_sheet_metal_audit_report,
     build_sheet_metal_calibration_management_df,
@@ -2027,6 +2028,119 @@ class DgbMultiRingTests(unittest.TestCase):
         self.assertIn("钣金件白痴指数复核_全量简称_20260625_132100", Path(output_path).name)
         self.assertEqual(exported.loc[0, "备件简称"], "翼子板")
         self.assertEqual(float(exported.loc[0, "合理上限"]), 11.0)
+
+    def test_sheet_metal_reasonable_samples_accept_status_or_index_bounds(self) -> None:
+        builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
+        self.assertIsNotNone(builder)
+        review_df = pd.DataFrame(
+            [
+                {"物料编码": "SM-001", "备件简称": "门板", "status": "正常", "白痴指数": 30.0, "合理下限": 10.0, "合理上限": 20.0},
+                {"物料编码": "SM-002", "备件简称": "门板", "status": "异常偏高", "白痴指数": 15.0, "合理下限": 10.0, "合理上限": 20.0},
+                {"物料编码": "SM-003", "备件简称": "门板", "status": "异常偏高", "白痴指数": 25.0, "合理下限": 10.0, "合理上限": 20.0},
+                {"物料编码": "SM-004", "备件简称": "门板", "status": "", "白痴指数": 15.0, "合理下限": np.nan, "合理上限": 20.0},
+            ]
+        )
+
+        samples = builder(review_df)
+
+        self.assertEqual(samples["物料编码"].tolist(), ["SM-001", "SM-002"])
+
+    def test_sheet_metal_non_material_coefficients_use_equal_weight_steel_anchor_and_fallbacks(self) -> None:
+        builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
+        calculator = getattr(sheet_metal_logic, "calculate_non_material_coefficients", None)
+        self.assertIsNotNone(builder)
+        self.assertIsNotNone(calculator)
+        review_df = pd.DataFrame(
+            [
+                {
+                    "物料编码": "SM-001",
+                    "物料名称": "左前门板",
+                    "备件简称": "门板",
+                    "status": "正常",
+                    "白痴指数": 12.0,
+                    "合理下限": 10.0,
+                    "合理上限": 20.0,
+                    "出厂单价": 120.0,
+                    "产品成本": 999.0,
+                    "净重": 20000.0,
+                    "包装后重量": 33333.0,
+                },
+                {
+                    "物料编码": "SM-002",
+                    "物料名称": "右前门板",
+                    "备件简称": "门板",
+                    "status": "异常偏高",
+                    "白痴指数": 16.0,
+                    "合理下限": 10.0,
+                    "合理上限": 20.0,
+                    "出厂单价": np.nan,
+                    "产品成本": 84.0,
+                    "净重": np.nan,
+                    "包装后重量": 14000.0,
+                },
+                {
+                    "物料编码": "SM-003",
+                    "物料名称": "翼子板",
+                    "备件简称": "翼子板",
+                    "status": "异常偏高",
+                    "白痴指数": 30.0,
+                    "合理下限": 10.0,
+                    "合理上限": 20.0,
+                    "出厂单价": 90.0,
+                    "净重": 10000.0,
+                },
+            ]
+        )
+        steel_anchor = {
+            "categories": [
+                {"category": "热轧板卷", "quotes": [4000.0, 4200.0]},
+                {"category": "冷轧板", "quotes": [5000.0]},
+                {"category": "镀锌板", "quotes": [6000.0]},
+                {"category": "中厚板", "quotes": [4900.0]},
+            ]
+        }
+
+        result = calculator(builder(review_df), steel_anchor)
+
+        self.assertEqual(
+            result.columns.tolist(),
+            ["物料编码", "物料名称", "备件简称", "样本数", "材料锚点", "材料时令价格", "成本", "重量", "白痴指数", "非材料成本系数"],
+        )
+        self.assertEqual(result["物料编码"].tolist(), ["SM-001", "SM-002"])
+        self.assertTrue((result["样本数"] == 2).all())
+        self.assertTrue((result["材料时令价格"] == 5000.0).all())
+        self.assertEqual(result["成本"].tolist(), [120.0, 84.0])
+        self.assertEqual(result["重量"].tolist(), [20000.0, 14000.0])
+        self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [0.2, 0.2]))
+        self.assertEqual(result.attrs["excluded_summary"]["not_reasonable"], 1)
+
+    def test_sheet_metal_non_material_coefficients_exclude_missing_cost_weight_and_anchor(self) -> None:
+        builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
+        calculator = getattr(sheet_metal_logic, "calculate_non_material_coefficients", None)
+        self.assertIsNotNone(builder)
+        self.assertIsNotNone(calculator)
+        review_df = pd.DataFrame(
+            [
+                {"物料编码": "SM-001", "物料名称": "A", "备件简称": "门板", "status": "正常", "白痴指数": 11.0, "出厂单价": np.nan, "产品成本": np.nan, "净重": 1000.0},
+                {"物料编码": "SM-002", "物料名称": "B", "备件简称": "门板", "status": "正常", "白痴指数": 12.0, "出厂单价": 10.0, "净重": np.nan, "包装后重量": np.nan},
+                {"物料编码": "SM-003", "物料名称": "C", "备件简称": "门板", "status": "正常", "白痴指数": 13.0, "出厂单价": 10.0, "净重": 0.0},
+                {"物料编码": "SM-004", "物料名称": "D", "备件简称": "门板", "status": "正常", "白痴指数": 14.0, "出厂单价": 20.0, "净重": 1000.0},
+                {"物料编码": "SM-005", "物料名称": "E", "备件简称": "", "status": "正常", "白痴指数": 15.0, "出厂单价": 20.0, "净重": 1000.0},
+            ]
+        )
+
+        result = calculator(builder(review_df), {"categories": [{"category": "热轧板卷", "quotes": [5000.0]}]})
+
+        self.assertEqual(result["物料编码"].tolist(), ["SM-004"])
+        summary = result.attrs["excluded_summary"]
+        self.assertEqual(summary["cost_missing"], 1)
+        self.assertEqual(summary["weight_missing"], 1)
+        self.assertEqual(summary["weight_invalid"], 1)
+        self.assertEqual(summary["short_name_missing"], 1)
+
+        missing_anchor = calculator(builder(review_df), {"categories": []})
+        self.assertTrue(missing_anchor.empty)
+        self.assertEqual(missing_anchor.attrs["excluded_summary"]["steel_anchor_missing"], 5)
 
     def test_cost_anomaly_chart_scope_uses_multi_selected_short_names(self) -> None:
         working_df = pd.DataFrame(
