@@ -280,6 +280,19 @@ def _normalize_steel_market_anchor(steel_anchor: dict | None) -> dict:
     return normalized
 
 
+def _mode_average_numeric(values: pd.Series, *, precision: int = 6) -> float:
+    numeric_values = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric_values.empty:
+        return float("nan")
+    rounded_values = numeric_values.astype(float).round(precision)
+    value_counts = rounded_values.value_counts(dropna=True)
+    if value_counts.empty:
+        return float("nan")
+    max_count = int(value_counts.max())
+    modes = value_counts[value_counts == max_count].index.astype(float)
+    return float(np.mean(modes))
+
+
 def load_sheet_metal_steel_market_anchor(
     manual_prices: dict[str, Any] | None = None,
     *,
@@ -308,6 +321,7 @@ def load_sheet_metal_steel_market_anchor(
 
     if requests is not None:
         session = session_factory() if session_factory else requests.Session()
+        session.trust_env = False
         session.headers.update(
             {
                 "User-Agent": (
@@ -425,8 +439,8 @@ def calculate_non_material_coefficients(samples_df: pd.DataFrame, steel_anchor: 
 
     valid_material_cost = material_cost.loc[valid_data.index].astype(float)
     valid_data["备件简称"] = short_names.loc[valid_data.index].astype(str)
-    valid_data["_单行非材料成本系数"] = (valid_data["成本"].astype(float) / valid_material_cost) - 1.0
-    group_coefficients = valid_data.groupby("备件简称")["_单行非材料成本系数"].transform("mean")
+    valid_data["_单行非材料成本系数百分数"] = ((valid_data["成本"].astype(float) / valid_material_cost) - 1.0) * 100.0
+    group_coefficients = valid_data.groupby("备件简称")["_单行非材料成本系数百分数"].transform(_mode_average_numeric)
     group_sample_counts = valid_data.groupby("备件简称")["备件简称"].transform("size")
 
     result = pd.DataFrame(
@@ -446,6 +460,7 @@ def calculate_non_material_coefficients(samples_df: pd.DataFrame, steel_anchor: 
     result = result[SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS].reset_index(drop=True)
     result.attrs["excluded_summary"] = summary
     result.attrs["steel_anchor"] = normalized_anchor
+    result.attrs["coefficient_unit"] = "percent"
     return result
 
 

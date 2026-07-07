@@ -104,6 +104,19 @@ def build_sheet_metal_review_run_request(
     }
 
 
+def build_sheet_metal_non_material_run_request(
+    *,
+    selected_short_names: list[str] | tuple[str, ...] | set[str],
+    calculate_selected_clicked: bool,
+    calculate_all_clicked: bool,
+) -> dict:
+    return build_sheet_metal_review_run_request(
+        selected_short_names=selected_short_names,
+        calculate_selected_clicked=calculate_selected_clicked,
+        calculate_all_clicked=calculate_all_clicked,
+    )
+
+
 def export_sheet_metal_review_result_excel(
     result_df: pd.DataFrame,
     export_path: str,
@@ -924,16 +937,12 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
     label_details = harness.execute_action("get_sheet_metal_feedback_details")
     label_statuses = {record_key: payload.get("label", "") for record_key, payload in label_details.items()}
 
-    mode_col, calc_col = st.columns([3, 1.4], vertical_alignment="bottom")
-    with mode_col:
-        st.radio(
-            "测算模式",
-            options=["原始测算", "优化后测算（专家纠偏）"],
-            key="sheet_metal_non_material_mode",
-            horizontal=True,
-        )
-    with calc_col:
-        calculate_clicked = st.button("计算非材料成本系数", type="primary", key="sheet_metal_non_material_calculate", width="stretch")
+    st.radio(
+        "测算模式",
+        options=["原始测算", "优化后测算（专家纠偏）"],
+        key="sheet_metal_non_material_mode",
+        horizontal=True,
+    )
 
     if skills_loaded:
         st.info(f"已加载数据库中的最新钣金指数技能书，当前测算会应用已保存的个性化边界。")
@@ -956,13 +965,39 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
             on_click=reset_sheet_metal_non_material_state,
         )
 
-    if calculate_clicked:
+    selected_calc_col, full_calc_col = st.columns([1.3, 1.3], vertical_alignment="bottom")
+    with selected_calc_col:
+        calculate_selected_clicked = st.button(
+            "计算所选简称",
+            type="secondary",
+            key="sheet_metal_non_material_calculate_selected",
+            width="stretch",
+            disabled=not selected_short_names,
+        )
+    with full_calc_col:
+        calculate_all_clicked = st.button(
+            "一键计算全量简称",
+            type="primary",
+            key="sheet_metal_non_material_calculate_all",
+            width="stretch",
+        )
+
+    run_request = build_sheet_metal_non_material_run_request(
+        selected_short_names=selected_short_names,
+        calculate_selected_clicked=calculate_selected_clicked,
+        calculate_all_clicked=calculate_all_clicked,
+    )
+
+    if run_request.get("message"):
+        st.warning(str(run_request["message"]))
+
+    if run_request["should_run"]:
         if not active_anchor or not active_anchor.get("average_price_per_ton"):
             st.warning("请先抓取或录入有效钢材锚点。")
         else:
             compute_source_df = base_df.copy()
-            if selected_short_names:
-                selected_set = set(map(str, selected_short_names))
+            if not run_request.get("include_all_short_names"):
+                selected_set = set(map(str, run_request.get("selected_short_names") or []))
                 compute_source_df = compute_source_df[compute_source_df["备件简称"].astype(str).isin(selected_set)].copy()
 
             if compute_source_df.empty:
@@ -983,10 +1018,12 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
                     samples_df = sheet_metal_logic.build_reasonable_sheet_metal_samples(review_df)
                     result_df = sheet_metal_logic.calculate_non_material_coefficients(samples_df, active_anchor)
 
-                scope_label = "全量简称" if not selected_short_names else f"所选{len(selected_short_names)}个简称"
+                scope_label = str(run_request.get("scope_label") or "测算结果")
                 st.session_state[_NON_MATERIAL_RESULT_STATE_KEY] = result_df
                 st.session_state[_NON_MATERIAL_REVIEW_STATE_KEY] = review_df
                 st.session_state[_NON_MATERIAL_SCOPE_STATE_KEY] = scope_label
+                if run_request.get("should_export_result"):
+                    st.success("全量非材料成本系数已计算完成，可在下方准备并下载 Excel。")
 
     result_df = st.session_state.get(_NON_MATERIAL_RESULT_STATE_KEY)
     review_df = st.session_state.get(_NON_MATERIAL_REVIEW_STATE_KEY)
@@ -1030,12 +1067,13 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
             "成本": st.column_config.NumberColumn("成本", disabled=True, format="%.4f"),
             "重量": st.column_config.NumberColumn("重量", disabled=True, format="%.4f"),
             "白痴指数": st.column_config.NumberColumn("白痴指数", disabled=True, format="%.4f"),
-            "非材料成本系数": st.column_config.NumberColumn("非材料成本系数", disabled=True, format="%.6f"),
+            "非材料成本系数": st.column_config.NumberColumn("非材料成本系数", disabled=True, format="%.2f%%"),
         },
         max_height=520,
     )
 
-    export_name = f"钣金件非材料成本系数_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    export_scope_label = _safe_sheet_metal_export_label(scope_label, default="测算结果")
+    export_name = f"钣金件非材料成本系数_{export_scope_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     render_deferred_download_button(
         label="下载钣金件非材料成本系数",
         prepare_label="准备导出钣金件非材料成本系数",

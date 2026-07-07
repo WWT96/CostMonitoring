@@ -32,6 +32,38 @@
         "computed_index = result[\"出厂单价\"] / denominator.replace(0, pd.NA)"
       ],
       "severity": "error"
+    },
+    {
+      "anchor_text": "def load_sheet_metal_steel_market_anchor",
+      "id": "sheet_metal_public_steel_fetch_contract",
+      "label": "生意社钢价实时抓取必须保留",
+      "mode": "contains_all",
+      "patterns": [
+        "\"热轧板卷\": \"https://rejuan.100ppi.com/\"",
+        "\"冷轧板\": \"https://lyb.100ppi.com/\"",
+        "\"镀锌板\": \"https://dxb.100ppi.com/\"",
+        "\"中厚板\": \"https://zhb.100ppi.com/\"",
+        "session.trust_env = False",
+        "_extract_100ppi_security_cookie",
+        "_fetch_steel_market_html(source_url, session=session, timeout=timeout)",
+        "_parse_price_quotes_from_html(html)"
+      ],
+      "severity": "error"
+    },
+    {
+      "anchor_text": "def load_sheet_metal_steel_market_anchor",
+      "id": "sheet_metal_public_steel_no_llm_fallback",
+      "label": "生意社钢价禁止LLM回退",
+      "mode": "forbid_any",
+      "patterns": [
+        "LLM 检索测试",
+        "用 LLM 检索钢价",
+        "source_mode",
+        "llm_configs",
+        "llm_completion_func",
+        "_load_sheet_metal_steel_market_anchor_from_llm"
+      ],
+      "severity": "error"
     }
   ]
 }

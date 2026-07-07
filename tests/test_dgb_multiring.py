@@ -61,6 +61,7 @@ from llm_engine import (
     normalize_vehicle_market_price_result,
 )
 from page_ui_helpers import get_vehicle_market_price_manual_editable_columns
+import harness
 import sheet_metal_logic
 import sheet_metal_ui
 from sheet_metal_logic import (
@@ -2140,8 +2141,39 @@ class DgbMultiRingTests(unittest.TestCase):
         self.assertTrue((result["材料时令价格"] == 5000.0).all())
         self.assertEqual(result["成本"].tolist(), [120.0, 84.0])
         self.assertEqual(result["重量"].tolist(), [20000.0, 14000.0])
-        self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [0.2, 0.2]))
+        self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [20.0, 20.0]))
+        self.assertEqual(result.attrs.get("coefficient_unit"), "percent")
         self.assertEqual(result.attrs["excluded_summary"]["not_reasonable"], 1)
+
+    def test_sheet_metal_non_material_coefficients_use_mode_average_percent_result(self) -> None:
+        builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
+        calculator = getattr(sheet_metal_logic, "calculate_non_material_coefficients", None)
+        self.assertIsNotNone(builder)
+        self.assertIsNotNone(calculator)
+        review_df = pd.DataFrame(
+            [
+                {
+                    "物料编码": f"SM-{idx:03d}",
+                    "物料名称": f"门板{idx}",
+                    "备件简称": "门板",
+                    "status": "正常",
+                    "白痴指数": 12.0,
+                    "合理下限": 10.0,
+                    "合理上限": 20.0,
+                    "出厂单价": cost,
+                    "净重": 20000.0,
+                }
+                for idx, cost in enumerate([120.0, 120.0, 140.0, 140.0, 180.0], start=1)
+            ]
+        )
+        steel_anchor = {"categories": [{"category": "热轧板卷", "quotes": [5000.0]}]}
+
+        result = calculator(builder(review_df), steel_anchor)
+
+        self.assertEqual(result["样本数"].tolist(), [5, 5, 5, 5, 5])
+        self.assertTrue((result["重量"] == 20000.0).all())
+        self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [30.0] * 5))
+        self.assertEqual(result.attrs.get("coefficient_unit"), "percent")
 
     def test_sheet_metal_non_material_coefficients_exclude_missing_cost_weight_and_anchor(self) -> None:
         builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
@@ -2173,6 +2205,41 @@ class DgbMultiRingTests(unittest.TestCase):
 
     def test_sheet_metal_non_material_coefficients_page_renderer_exists(self) -> None:
         self.assertTrue(callable(getattr(sheet_metal_ui, "render_sheet_metal_non_material_coefficients_page", None)))
+
+    def test_sheet_metal_non_material_run_request_separates_selected_and_all_names(self) -> None:
+        resolver = getattr(sheet_metal_ui, "build_sheet_metal_non_material_run_request", None)
+        self.assertTrue(callable(resolver))
+
+        selected_run = resolver(
+            selected_short_names=["门板", "门板", " 翼子板 "],
+            calculate_selected_clicked=True,
+            calculate_all_clicked=False,
+        )
+        all_run = resolver(
+            selected_short_names=["门板"],
+            calculate_selected_clicked=False,
+            calculate_all_clicked=True,
+        )
+        invalid_selected = resolver(
+            selected_short_names=[],
+            calculate_selected_clicked=True,
+            calculate_all_clicked=False,
+        )
+
+        self.assertTrue(selected_run["should_run"])
+        self.assertFalse(selected_run["include_all_short_names"])
+        self.assertEqual(selected_run["selected_short_names"], ["门板", "翼子板"])
+        self.assertEqual(selected_run["scope_label"], "所选2个简称")
+        self.assertFalse(selected_run["should_export_result"])
+
+        self.assertTrue(all_run["should_run"])
+        self.assertTrue(all_run["include_all_short_names"])
+        self.assertEqual(all_run["selected_short_names"], [])
+        self.assertEqual(all_run["scope_label"], "全量简称")
+        self.assertTrue(all_run["should_export_result"])
+
+        self.assertFalse(invalid_selected["should_run"])
+        self.assertIn("请选择至少一个", invalid_selected["message"])
 
     def test_sheet_metal_public_steel_anchor_handles_security_cookie_and_partial_failures(self) -> None:
         class FakeResponse:
@@ -2217,6 +2284,7 @@ class DgbMultiRingTests(unittest.TestCase):
             session_factory=lambda: fake_session,
         )
 
+        self.assertFalse(fake_session.trust_env)
         self.assertEqual(sheet_metal_logic._STEEL_MARKET_URLS["中厚板"], "https://zhb.100ppi.com/")
         self.assertEqual([item["category"] for item in anchor["categories"]], ["热轧板卷", "冷轧板", "中厚板"])
         self.assertAlmostEqual(anchor["average_price_per_ton"], 3483.3333, places=4)
@@ -2227,6 +2295,17 @@ class DgbMultiRingTests(unittest.TestCase):
         quotes = sheet_metal_logic._parse_price_quotes_from_html("07月06日中厚板参考价为3360.00，较上一日上涨")
 
         self.assertEqual(quotes, [3360.0])
+
+    def test_sheet_metal_logic_harness_locks_public_steel_fetch_contract(self) -> None:
+        audit = harness.audit_system_integrity()
+        sheet_metal_findings = [
+            finding
+            for finding in audit["findings"]
+            if finding.get("relative_path") == "sheet_metal_logic.py"
+            and str(finding.get("label", "")).startswith("生意社钢价")
+        ]
+
+        self.assertEqual(sheet_metal_findings, [])
 
     def test_sheet_metal_manual_steel_inputs_open_first_then_save_valid_anchor(self) -> None:
         resolver = getattr(sheet_metal_ui, "build_sheet_metal_manual_steel_anchor_request", None)
