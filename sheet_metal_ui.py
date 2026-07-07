@@ -42,6 +42,14 @@ _NON_MATERIAL_EXCLUSION_LABELS = {
     "material_cost_invalid": "材料成本无效",
     "short_name_missing": "备件简称缺失",
 }
+SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS = {
+    "材料时令价格": "%.2f",
+    "成本": "%.2f",
+    "重量": "%.2f",
+    "白痴指数": "%.2f",
+    "材料成本": "%.2f",
+    "非材料成本系数": "%.2f%%",
+}
 
 
 def _sheet_metal_skills_fingerprint(skills: list[dict]) -> str:
@@ -1063,12 +1071,36 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
         "sheet_metal_non_material_coefficients",
         column_config={
             "样本数": st.column_config.NumberColumn("样本数", disabled=True),
-            "材料时令价格": st.column_config.NumberColumn("材料时令价格", disabled=True, format="%.2f"),
-            "成本": st.column_config.NumberColumn("成本", disabled=True, format="%.4f"),
-            "重量": st.column_config.NumberColumn("重量", disabled=True, format="%.4f"),
-            "白痴指数": st.column_config.NumberColumn("白痴指数", disabled=True, format="%.4f"),
-            "材料成本": st.column_config.NumberColumn("材料成本", disabled=True, format="%.4f"),
-            "非材料成本系数": st.column_config.NumberColumn("非材料成本系数", disabled=True, format="%.2f%%"),
+            "材料时令价格": st.column_config.NumberColumn(
+                "材料时令价格",
+                disabled=True,
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料时令价格"],
+            ),
+            "成本": st.column_config.NumberColumn(
+                "成本",
+                disabled=True,
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["成本"],
+            ),
+            "重量": st.column_config.NumberColumn(
+                "重量",
+                disabled=True,
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["重量"],
+            ),
+            "白痴指数": st.column_config.NumberColumn(
+                "白痴指数",
+                disabled=True,
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["白痴指数"],
+            ),
+            "材料成本": st.column_config.NumberColumn(
+                "材料成本",
+                disabled=True,
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料成本"],
+            ),
+            "非材料成本系数": st.column_config.NumberColumn(
+                "非材料成本系数",
+                disabled=True,
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["非材料成本系数"],
+            ),
         },
         max_height=520,
     )

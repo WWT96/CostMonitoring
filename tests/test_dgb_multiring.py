@@ -2208,6 +2208,21 @@ class DgbMultiRingTests(unittest.TestCase):
     def test_sheet_metal_non_material_coefficients_page_renderer_exists(self) -> None:
         self.assertTrue(callable(getattr(sheet_metal_ui, "render_sheet_metal_non_material_coefficients_page", None)))
 
+    def test_sheet_metal_non_material_result_numeric_display_formats_use_two_decimals(self) -> None:
+        formats = getattr(sheet_metal_ui, "SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS", None)
+
+        self.assertEqual(
+            formats,
+            {
+                "材料时令价格": "%.2f",
+                "成本": "%.2f",
+                "重量": "%.2f",
+                "白痴指数": "%.2f",
+                "材料成本": "%.2f",
+                "非材料成本系数": "%.2f%%",
+            },
+        )
+
     def test_sheet_metal_non_material_run_request_separates_selected_and_all_names(self) -> None:
         resolver = getattr(sheet_metal_ui, "build_sheet_metal_non_material_run_request", None)
         self.assertTrue(callable(resolver))
