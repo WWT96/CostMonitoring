@@ -625,6 +625,56 @@ def calculate_sheet_metal_price_suggestions(
     return result
 
 
+def ensure_sheet_metal_price_suggestion_deviation(
+    result_df: pd.DataFrame | None,
+    source_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    result = result_df.copy() if isinstance(result_df, pd.DataFrame) else pd.DataFrame()
+    source_attrs = getattr(result_df, "attrs", {}) if isinstance(result_df, pd.DataFrame) else {}
+    if result.empty and not list(result.columns):
+        result = pd.DataFrame(columns=SHEET_METAL_PRICE_SUGGESTION_COLUMNS)
+
+    for column_name in SHEET_METAL_PRICE_SUGGESTION_COLUMNS:
+        if column_name not in result.columns:
+            result[column_name] = np.nan
+
+    if (
+        source_df is not None
+        and isinstance(source_df, pd.DataFrame)
+        and not source_df.empty
+        and "物料编码" in result.columns
+        and "物料编码" in source_df.columns
+    ):
+        source_data = _apply_alias_renames(source_df)
+        if "产品成本" in source_data.columns:
+            cost_lookup = source_data[["物料编码", "产品成本"]].copy()
+            cost_lookup["物料编码"] = _clean_text_series(cost_lookup["物料编码"]).fillna("").astype(str)
+            cost_lookup["_原成本_源数据"] = pd.to_numeric(cost_lookup["产品成本"], errors="coerce")
+            cost_lookup = cost_lookup.dropna(subset=["物料编码"]).drop_duplicates(subset=["物料编码"], keep="last")
+
+            result["物料编码"] = _clean_text_series(result["物料编码"]).fillna("").astype(str)
+            result = result.merge(
+                cost_lookup[["物料编码", "_原成本_源数据"]],
+                on="物料编码",
+                how="left",
+            )
+            result["原成本"] = pd.to_numeric(result["原成本"], errors="coerce").where(
+                pd.to_numeric(result["原成本"], errors="coerce").notna(),
+                result["_原成本_源数据"],
+            )
+            result = result.drop(columns=["_原成本_源数据"], errors="ignore")
+
+    original_costs = pd.to_numeric(result["原成本"], errors="coerce")
+    suggested_prices = pd.to_numeric(result["建议价格"], errors="coerce")
+    result["偏离度"] = ((original_costs - suggested_prices) / suggested_prices * 100.0).where(
+        suggested_prices.notna() & suggested_prices.ne(0)
+    )
+
+    result = result[SHEET_METAL_PRICE_SUGGESTION_COLUMNS].reset_index(drop=True)
+    result.attrs.update(source_attrs)
+    return result
+
+
 def _append_sheet_metal_cost_weight_fields(result_df: pd.DataFrame, source_df: pd.DataFrame) -> pd.DataFrame:
     if result_df is None or result_df.empty or source_df is None or source_df.empty:
         return result_df

@@ -301,6 +301,19 @@ def build_sheet_metal_manual_steel_anchor_request(
     }
 
 
+def build_sheet_metal_price_suggestion_visible_columns(current_visible_columns: object) -> list[str]:
+    desired_columns = list(sheet_metal_logic.SHEET_METAL_PRICE_SUGGESTION_COLUMNS)
+    if not isinstance(current_visible_columns, (list, tuple, set)):
+        return desired_columns
+
+    current_columns = [str(column_name) for column_name in current_visible_columns if str(column_name) in desired_columns]
+    required_columns = {"原成本", "偏离度"}
+    if required_columns.difference(current_columns):
+        current_set = set(current_columns) | required_columns
+        current_columns = [column_name for column_name in desired_columns if column_name in current_set]
+    return current_columns or desired_columns
+
+
 def _render_non_material_anchor_summary(anchor: dict | None) -> None:
     if not anchor or not anchor.get("average_price_per_ton"):
         st.info("当前未设置有效钢材锚点。")
@@ -1307,6 +1320,10 @@ def render_sheet_metal_price_suggestion_page() -> None:
         st.info("初始状态不会进行钣金件价格建议测算。")
         return
 
+    if isinstance(result_df, pd.DataFrame):
+        result_df = sheet_metal_logic.ensure_sheet_metal_price_suggestion_deviation(result_df, base_df)
+        st.session_state[_PRICE_SUGGESTION_RESULT_STATE_KEY] = result_df
+
     summary = result_df.attrs.get("excluded_summary", {}) if isinstance(result_df, pd.DataFrame) else {}
     excluded_total = int(sum(int(value or 0) for value in summary.values()))
     coefficient_count = len(coefficient_summary_df) if isinstance(coefficient_summary_df, pd.DataFrame) else 0
@@ -1322,6 +1339,12 @@ def render_sheet_metal_price_suggestion_page() -> None:
     if result_df.empty:
         st.warning("当前没有可输出的钣金件价格建议。")
         return
+
+    visible_state_key = "sheet_metal_price_suggestions_visible_columns"
+    if visible_state_key in st.session_state:
+        st.session_state[visible_state_key] = build_sheet_metal_price_suggestion_visible_columns(
+            st.session_state.get(visible_state_key)
+        )
 
     preview_df, visible_columns = prepare_table_view(
         result_df,

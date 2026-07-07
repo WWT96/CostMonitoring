@@ -2241,6 +2241,42 @@ class DgbMultiRingTests(unittest.TestCase):
         self.assertTrue(np.allclose(result["原成本"].to_numpy(dtype=float), [150.0, 60.0]))
         self.assertTrue(np.allclose(result["偏离度"].to_numpy(dtype=float), [25.0, -7.6923076923]))
 
+    def test_sheet_metal_price_suggestions_backfill_deviation_for_cached_results(self) -> None:
+        backfiller = getattr(sheet_metal_logic, "ensure_sheet_metal_price_suggestion_deviation", None)
+        self.assertTrue(callable(backfiller))
+        cached_result = pd.DataFrame(
+            [
+                {"物料编码": "SM-001", "物料名称": "左前门板", "备件简称": "门板", "材料时令价格": 5000.0, "重量": 20000.0, "材料成本": 100.0, "简称级非材料系数": 20.0, "建议价格": 120.0},
+            ]
+        )
+        cached_result.attrs["excluded_summary"] = {"coefficient_missing": 1}
+        source_df = pd.DataFrame([{"物料编码": "SM-001", "产品成本": 150.0}])
+
+        result = backfiller(cached_result, source_df)
+
+        self.assertEqual(result.columns.tolist(), sheet_metal_logic.SHEET_METAL_PRICE_SUGGESTION_COLUMNS)
+        self.assertEqual(float(result.loc[0, "原成本"]), 150.0)
+        self.assertAlmostEqual(float(result.loc[0, "偏离度"]), 25.0)
+        self.assertEqual(result.attrs["excluded_summary"], {"coefficient_missing": 1})
+
+    def test_sheet_metal_price_suggestions_visible_columns_include_deviation_after_schema_change(self) -> None:
+        resolver = getattr(sheet_metal_ui, "build_sheet_metal_price_suggestion_visible_columns", None)
+        self.assertTrue(callable(resolver))
+        previous_visible_columns = [
+            "物料编码",
+            "物料名称",
+            "备件简称",
+            "材料时令价格",
+            "重量",
+            "材料成本",
+            "简称级非材料系数",
+            "建议价格",
+        ]
+
+        result = resolver(previous_visible_columns)
+
+        self.assertEqual(result, sheet_metal_logic.SHEET_METAL_PRICE_SUGGESTION_COLUMNS)
+
     def test_sheet_metal_non_material_coefficients_exclude_missing_cost_weight_and_anchor(self) -> None:
         builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
         calculator = getattr(sheet_metal_logic, "calculate_non_material_coefficients", None)
