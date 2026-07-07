@@ -2207,6 +2207,7 @@ class DgbMultiRingTests(unittest.TestCase):
                     "物料编码": "SM-001",
                     "物料名称": "左前门板",
                     "备件简称": "门板",
+                    "产品成本": 150.0,
                     "净重": 20000.0,
                     "包装后重量": 25000.0,
                 },
@@ -2214,6 +2215,7 @@ class DgbMultiRingTests(unittest.TestCase):
                     "物料编码": "SM-002",
                     "物料名称": "右前翼子板",
                     "备件简称": "翼子板",
+                    "产品成本": 60.0,
                     "净重": np.nan,
                     "包装后重量": 10000.0,
                 },
@@ -2231,11 +2233,13 @@ class DgbMultiRingTests(unittest.TestCase):
 
         self.assertEqual(
             result.columns.tolist(),
-            ["物料编码", "物料名称", "备件简称", "材料时令价格", "重量", "材料成本", "简称级非材料系数", "建议价格"],
+            ["物料编码", "物料名称", "备件简称", "材料时令价格", "重量", "材料成本", "简称级非材料系数", "原成本", "建议价格", "偏离度"],
         )
         self.assertEqual(result["物料编码"].tolist(), ["SM-001", "SM-002"])
         self.assertTrue(np.allclose(result["材料成本"].to_numpy(dtype=float), [100.0, 50.0]))
         self.assertTrue(np.allclose(result["建议价格"].to_numpy(dtype=float), [120.0, 65.0]))
+        self.assertTrue(np.allclose(result["原成本"].to_numpy(dtype=float), [150.0, 60.0]))
+        self.assertTrue(np.allclose(result["偏离度"].to_numpy(dtype=float), [25.0, -7.6923076923]))
 
     def test_sheet_metal_non_material_coefficients_exclude_missing_cost_weight_and_anchor(self) -> None:
         builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
@@ -2282,7 +2286,9 @@ class DgbMultiRingTests(unittest.TestCase):
                 "材料成本": "%.2f",
                 "非材料成本系数": "%.2f%%",
                 "简称级非材料系数": "%.2f%%",
+                "原成本": "%.2f",
                 "建议价格": "%.2f",
+                "偏离度": "%.2f%%",
             },
         )
 

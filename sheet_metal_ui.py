@@ -55,7 +55,9 @@ SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS = {
     "材料成本": "%.2f",
     "非材料成本系数": "%.2f%%",
     "简称级非材料系数": "%.2f%%",
+    "原成本": "%.2f",
     "建议价格": "%.2f",
+    "偏离度": "%.2f%%",
 }
 
 
@@ -1336,7 +1338,9 @@ def render_sheet_metal_price_suggestion_page() -> None:
             "重量": st.column_config.NumberColumn("重量", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["重量"]),
             "材料成本": st.column_config.NumberColumn("材料成本", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料成本"]),
             "简称级非材料系数": st.column_config.NumberColumn("简称级非材料系数", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["简称级非材料系数"]),
+            "原成本": st.column_config.NumberColumn("原成本", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["原成本"]),
             "建议价格": st.column_config.NumberColumn("建议价格", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["建议价格"]),
+            "偏离度": st.column_config.NumberColumn("偏离度", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["偏离度"]),
         },
         max_height=560,
     )

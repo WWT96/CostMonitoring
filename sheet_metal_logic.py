@@ -53,7 +53,9 @@ SHEET_METAL_PRICE_SUGGESTION_COLUMNS = [
     "重量",
     "材料成本",
     "简称级非材料系数",
+    "原成本",
     "建议价格",
+    "偏离度",
 ]
 _NON_MATERIAL_EXCLUDE_KEYS = [
     "not_reasonable",
@@ -572,6 +574,7 @@ def calculate_sheet_metal_price_suggestions(
 
     short_names = _clean_text_series(data["备件简称"])
     weights = _first_numeric_series(data, "净重", "包装后重量")
+    original_costs = _first_numeric_series(data, "产品成本")
     coefficients = short_names.map(coefficient_lookup)
     material_price_per_kg = float(material_price_per_ton) / 1000.0
     material_cost = (weights / 1000.0) * material_price_per_kg
@@ -595,9 +598,11 @@ def calculate_sheet_metal_price_suggestions(
         return result
 
     valid_weights = weights.loc[valid_data.index].astype(float)
+    valid_original_costs = original_costs.loc[valid_data.index]
     valid_material_cost = material_cost.loc[valid_data.index].astype(float)
     valid_coefficients = coefficients.loc[valid_data.index].astype(float)
     suggested_prices = valid_material_cost * (1.0 + valid_coefficients / 100.0)
+    deviation = ((valid_original_costs - suggested_prices) / suggested_prices * 100.0).where(suggested_prices.ne(0))
 
     result = pd.DataFrame(
         {
@@ -608,7 +613,9 @@ def calculate_sheet_metal_price_suggestions(
             "重量": valid_weights.round(4),
             "材料成本": valid_material_cost.round(4),
             "简称级非材料系数": valid_coefficients.round(6),
+            "原成本": valid_original_costs.round(4),
             "建议价格": suggested_prices.round(4),
+            "偏离度": deviation.round(6),
         }
     )
     result = result[SHEET_METAL_PRICE_SUGGESTION_COLUMNS].reset_index(drop=True)
