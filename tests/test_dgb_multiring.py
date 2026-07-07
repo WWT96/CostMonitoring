@@ -2134,13 +2134,14 @@ class DgbMultiRingTests(unittest.TestCase):
 
         self.assertEqual(
             result.columns.tolist(),
-            ["物料编码", "物料名称", "备件简称", "样本数", "材料锚点", "材料时令价格", "成本", "重量", "白痴指数", "非材料成本系数"],
+            ["物料编码", "物料名称", "备件简称", "样本数", "材料锚点", "材料时令价格", "成本", "重量", "白痴指数", "材料成本", "非材料成本系数"],
         )
         self.assertEqual(result["物料编码"].tolist(), ["SM-001", "SM-002"])
         self.assertTrue((result["样本数"] == 2).all())
         self.assertTrue((result["材料时令价格"] == 5000.0).all())
         self.assertEqual(result["成本"].tolist(), [120.0, 84.0])
         self.assertEqual(result["重量"].tolist(), [20000.0, 14000.0])
+        self.assertTrue(np.allclose(result["材料成本"].to_numpy(dtype=float), [100.0, 70.0]))
         self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [20.0, 20.0]))
         self.assertEqual(result.attrs.get("coefficient_unit"), "percent")
         self.assertEqual(result.attrs["excluded_summary"]["not_reasonable"], 1)
@@ -2172,6 +2173,7 @@ class DgbMultiRingTests(unittest.TestCase):
 
         self.assertEqual(result["样本数"].tolist(), [5, 5, 5, 5, 5])
         self.assertTrue((result["重量"] == 20000.0).all())
+        self.assertTrue((result["材料成本"] == 100.0).all())
         self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [30.0] * 5))
         self.assertEqual(result.attrs.get("coefficient_unit"), "percent")
 

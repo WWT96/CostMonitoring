@@ -1067,6 +1067,7 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
             "成本": st.column_config.NumberColumn("成本", disabled=True, format="%.4f"),
             "重量": st.column_config.NumberColumn("重量", disabled=True, format="%.4f"),
             "白痴指数": st.column_config.NumberColumn("白痴指数", disabled=True, format="%.4f"),
+            "材料成本": st.column_config.NumberColumn("材料成本", disabled=True, format="%.4f"),
             "非材料成本系数": st.column_config.NumberColumn("非材料成本系数", disabled=True, format="%.2f%%"),
         },
         max_height=520,

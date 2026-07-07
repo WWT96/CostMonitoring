@@ -36,6 +36,7 @@ SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS = [
     "成本",
     "重量",
     "白痴指数",
+    "材料成本",
     "非材料成本系数",
 ]
 _NON_MATERIAL_EXCLUDE_KEYS = [
@@ -453,6 +454,7 @@ def calculate_non_material_coefficients(samples_df: pd.DataFrame, steel_anchor: 
             "成本": valid_data["成本"].astype(float).round(4),
             "重量": valid_data["重量"].astype(float).round(4),
             "白痴指数": valid_data["白痴指数"].astype(float).round(4),
+            "材料成本": valid_material_cost.astype(float).round(4),
             "非材料成本系数": group_coefficients.astype(float).round(6),
         }
     )

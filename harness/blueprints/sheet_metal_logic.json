@@ -74,6 +74,7 @@
         "reasonable_mask = in_bounds",
         "material_price_per_kg = float(material_price_per_ton) / 1000.0",
         "material_cost = (data[\"重量\"] / 1000.0) * material_price_per_kg",
+        "\"材料成本\": valid_material_cost.astype(float).round(4)",
         "valid_data[\"_单行非材料成本系数百分数\"] = ((valid_data[\"成本\"].astype(float) / valid_material_cost) - 1.0) * 100.0",
         "group_coefficients = valid_data.groupby(\"备件简称\")[\"_单行非材料成本系数百分数\"].transform(_mode_average_numeric)",
         "result.attrs[\"coefficient_unit\"] = \"percent\""
