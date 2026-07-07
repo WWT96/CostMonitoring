@@ -2031,7 +2031,7 @@ class DgbMultiRingTests(unittest.TestCase):
         self.assertEqual(exported.loc[0, "备件简称"], "翼子板")
         self.assertEqual(float(exported.loc[0, "合理上限"]), 11.0)
 
-    def test_sheet_metal_reasonable_samples_accept_status_or_index_bounds(self) -> None:
+    def test_sheet_metal_reasonable_samples_require_index_inside_bounds(self) -> None:
         builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
         self.assertIsNotNone(builder)
         review_df = pd.DataFrame(
@@ -2045,7 +2045,7 @@ class DgbMultiRingTests(unittest.TestCase):
 
         samples = builder(review_df)
 
-        self.assertEqual(samples["物料编码"].tolist(), ["SM-001", "SM-002"])
+        self.assertEqual(samples["物料编码"].tolist(), ["SM-002"])
 
     def test_sheet_metal_detection_preserves_cost_and_weight_fields_for_non_material_coefficients(self) -> None:
         base_df = pd.DataFrame(
@@ -2182,11 +2182,11 @@ class DgbMultiRingTests(unittest.TestCase):
         self.assertIsNotNone(calculator)
         review_df = pd.DataFrame(
             [
-                {"物料编码": "SM-001", "物料名称": "A", "备件简称": "门板", "status": "正常", "白痴指数": 11.0, "出厂单价": np.nan, "产品成本": np.nan, "净重": 1000.0},
-                {"物料编码": "SM-002", "物料名称": "B", "备件简称": "门板", "status": "正常", "白痴指数": 12.0, "出厂单价": 10.0, "净重": np.nan, "包装后重量": np.nan},
-                {"物料编码": "SM-003", "物料名称": "C", "备件简称": "门板", "status": "正常", "白痴指数": 13.0, "出厂单价": 10.0, "净重": 0.0},
-                {"物料编码": "SM-004", "物料名称": "D", "备件简称": "门板", "status": "正常", "白痴指数": 14.0, "出厂单价": 20.0, "净重": 1000.0},
-                {"物料编码": "SM-005", "物料名称": "E", "备件简称": "", "status": "正常", "白痴指数": 15.0, "出厂单价": 20.0, "净重": 1000.0},
+                {"物料编码": "SM-001", "物料名称": "A", "备件简称": "门板", "status": "正常", "白痴指数": 11.0, "合理下限": 10.0, "合理上限": 20.0, "出厂单价": np.nan, "产品成本": np.nan, "净重": 1000.0},
+                {"物料编码": "SM-002", "物料名称": "B", "备件简称": "门板", "status": "正常", "白痴指数": 12.0, "合理下限": 10.0, "合理上限": 20.0, "出厂单价": 10.0, "净重": np.nan, "包装后重量": np.nan},
+                {"物料编码": "SM-003", "物料名称": "C", "备件简称": "门板", "status": "正常", "白痴指数": 13.0, "合理下限": 10.0, "合理上限": 20.0, "出厂单价": 10.0, "净重": 0.0},
+                {"物料编码": "SM-004", "物料名称": "D", "备件简称": "门板", "status": "正常", "白痴指数": 14.0, "合理下限": 10.0, "合理上限": 20.0, "出厂单价": 20.0, "净重": 1000.0},
+                {"物料编码": "SM-005", "物料名称": "E", "备件简称": "", "status": "正常", "白痴指数": 15.0, "合理下限": 10.0, "合理上限": 20.0, "出厂单价": 20.0, "净重": 1000.0},
             ]
         )
 

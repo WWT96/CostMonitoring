@@ -953,7 +953,7 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
     filter_col, reset_col = st.columns([5, 1], vertical_alignment="bottom")
     with filter_col:
         selected_short_names = st.multiselect(
-            "备件简称筛选（不选择则全量）",
+            "备件简称筛选（用于计算所选简称）",
             options=short_name_options,
             key="sheet_metal_non_material_short_names",
         )

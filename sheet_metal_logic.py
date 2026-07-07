@@ -382,10 +382,9 @@ def build_reasonable_sheet_metal_samples(review_df: pd.DataFrame) -> pd.DataFram
     for column_name in ["白痴指数", "合理下限", "合理上限"]:
         data[column_name] = _coerce_numeric_series(data, column_name)
 
-    status_normal = data["status"].astype(str).str.contains("正常", na=False)
     in_bounds = data["白痴指数"].notna() & data["合理下限"].notna() & data["合理上限"].notna()
     in_bounds &= data["白痴指数"].between(data["合理下限"], data["合理上限"], inclusive="both")
-    reasonable_mask = status_normal | in_bounds
+    reasonable_mask = in_bounds
 
     samples = data[reasonable_mask].copy()
     samples.attrs["excluded_summary"] = {"not_reasonable": int((~reasonable_mask).sum())}

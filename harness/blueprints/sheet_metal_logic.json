@@ -64,6 +64,21 @@
         "_load_sheet_metal_steel_market_anchor_from_llm"
       ],
       "severity": "error"
+    },
+    {
+      "anchor_text": "def calculate_non_material_coefficients",
+      "id": "sheet_metal_non_material_formula_contract",
+      "label": "钣金非材料系数公式必须锁定",
+      "mode": "contains_all",
+      "patterns": [
+        "reasonable_mask = in_bounds",
+        "material_price_per_kg = float(material_price_per_ton) / 1000.0",
+        "material_cost = (data[\"重量\"] / 1000.0) * material_price_per_kg",
+        "valid_data[\"_单行非材料成本系数百分数\"] = ((valid_data[\"成本\"].astype(float) / valid_material_cost) - 1.0) * 100.0",
+        "group_coefficients = valid_data.groupby(\"备件简称\")[\"_单行非材料成本系数百分数\"].transform(_mode_average_numeric)",
+        "result.attrs[\"coefficient_unit\"] = \"percent\""
+      ],
+      "severity": "error"
     }
   ]
 }
