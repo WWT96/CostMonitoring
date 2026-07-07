@@ -2177,6 +2177,66 @@ class DgbMultiRingTests(unittest.TestCase):
         self.assertTrue(np.allclose(result["非材料成本系数"].to_numpy(dtype=float), [30.0] * 5))
         self.assertEqual(result.attrs.get("coefficient_unit"), "percent")
 
+    def test_sheet_metal_non_material_summary_collapses_to_short_name_conclusions(self) -> None:
+        summarizer = getattr(sheet_metal_logic, "summarize_non_material_coefficients", None)
+        self.assertTrue(callable(summarizer))
+        detail_df = pd.DataFrame(
+            [
+                {"备件简称": "门板", "样本数": 2, "白痴指数": 12.0, "非材料成本系数": 20.0},
+                {"备件简称": "门板", "样本数": 2, "白痴指数": 16.0, "非材料成本系数": 20.0},
+                {"备件简称": "翼子板", "样本数": 1, "白痴指数": 8.0, "非材料成本系数": 30.0},
+            ]
+        )
+        detail_df.attrs["excluded_summary"] = {"not_reasonable": 3}
+
+        summary_df = summarizer(detail_df)
+
+        self.assertEqual(summary_df.columns.tolist(), ["备件简称", "样本数量", "白痴指数区间", "简称级非材料系数"])
+        self.assertEqual(summary_df["备件简称"].tolist(), ["门板", "翼子板"])
+        self.assertEqual(summary_df["样本数量"].tolist(), [2, 1])
+        self.assertEqual(summary_df["白痴指数区间"].tolist(), ["12.00 ~ 16.00", "8.00 ~ 8.00"])
+        self.assertEqual(summary_df["简称级非材料系数"].tolist(), [20.0, 30.0])
+        self.assertEqual(summary_df.attrs["excluded_summary"], {"not_reasonable": 3})
+
+    def test_sheet_metal_price_suggestions_use_short_name_coefficients_and_weight_units(self) -> None:
+        calculator = getattr(sheet_metal_logic, "calculate_sheet_metal_price_suggestions", None)
+        self.assertTrue(callable(calculator))
+        source_df = pd.DataFrame(
+            [
+                {
+                    "物料编码": "SM-001",
+                    "物料名称": "左前门板",
+                    "备件简称": "门板",
+                    "净重": 20000.0,
+                    "包装后重量": 25000.0,
+                },
+                {
+                    "物料编码": "SM-002",
+                    "物料名称": "右前翼子板",
+                    "备件简称": "翼子板",
+                    "净重": np.nan,
+                    "包装后重量": 10000.0,
+                },
+            ]
+        )
+        coefficient_summary = pd.DataFrame(
+            [
+                {"备件简称": "门板", "简称级非材料系数": 20.0},
+                {"备件简称": "翼子板", "简称级非材料系数": 30.0},
+            ]
+        )
+        steel_anchor = {"categories": [{"category": "热轧板卷", "quotes": [5000.0]}]}
+
+        result = calculator(source_df, coefficient_summary, steel_anchor)
+
+        self.assertEqual(
+            result.columns.tolist(),
+            ["物料编码", "物料名称", "备件简称", "材料时令价格", "重量", "材料成本", "简称级非材料系数", "建议价格"],
+        )
+        self.assertEqual(result["物料编码"].tolist(), ["SM-001", "SM-002"])
+        self.assertTrue(np.allclose(result["材料成本"].to_numpy(dtype=float), [100.0, 50.0]))
+        self.assertTrue(np.allclose(result["建议价格"].to_numpy(dtype=float), [120.0, 65.0]))
+
     def test_sheet_metal_non_material_coefficients_exclude_missing_cost_weight_and_anchor(self) -> None:
         builder = getattr(sheet_metal_logic, "build_reasonable_sheet_metal_samples", None)
         calculator = getattr(sheet_metal_logic, "calculate_non_material_coefficients", None)
@@ -2207,6 +2267,7 @@ class DgbMultiRingTests(unittest.TestCase):
 
     def test_sheet_metal_non_material_coefficients_page_renderer_exists(self) -> None:
         self.assertTrue(callable(getattr(sheet_metal_ui, "render_sheet_metal_non_material_coefficients_page", None)))
+        self.assertTrue(callable(getattr(sheet_metal_ui, "render_sheet_metal_price_suggestion_page", None)))
 
     def test_sheet_metal_non_material_result_numeric_display_formats_use_two_decimals(self) -> None:
         formats = getattr(sheet_metal_ui, "SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS", None)

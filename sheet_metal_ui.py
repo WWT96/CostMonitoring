@@ -30,9 +30,13 @@ from storage_service import find_feedback_rows_missing_required_remarks
 SHEET_METAL_SKILL_DOMAIN = "sheet_metal"
 _NON_MATERIAL_ANCHOR_STATE_KEY = "sheet_metal_non_material_active_anchor"
 _NON_MATERIAL_RESULT_STATE_KEY = "sheet_metal_non_material_result"
+_NON_MATERIAL_DETAIL_RESULT_STATE_KEY = "sheet_metal_non_material_detail_result"
 _NON_MATERIAL_REVIEW_STATE_KEY = "sheet_metal_non_material_review"
 _NON_MATERIAL_SCOPE_STATE_KEY = "sheet_metal_non_material_scope"
 _NON_MATERIAL_MANUAL_PANEL_STATE_KEY = "sheet_metal_non_material_manual_panel_visible"
+_PRICE_SUGGESTION_RESULT_STATE_KEY = "sheet_metal_price_suggestion_result"
+_PRICE_SUGGESTION_SCOPE_STATE_KEY = "sheet_metal_price_suggestion_scope"
+_PRICE_SUGGESTION_COEFFICIENT_STATE_KEY = "sheet_metal_price_suggestion_coefficients"
 _NON_MATERIAL_EXCLUSION_LABELS = {
     "not_reasonable": "白痴指数不合理",
     "cost_missing": "成本缺失",
@@ -41,6 +45,7 @@ _NON_MATERIAL_EXCLUSION_LABELS = {
     "steel_anchor_missing": "钢价锚点缺失",
     "material_cost_invalid": "材料成本无效",
     "short_name_missing": "备件简称缺失",
+    "coefficient_missing": "简称级系数缺失",
 }
 SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS = {
     "材料时令价格": "%.2f",
@@ -49,6 +54,8 @@ SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS = {
     "白痴指数": "%.2f",
     "材料成本": "%.2f",
     "非材料成本系数": "%.2f%%",
+    "简称级非材料系数": "%.2f%%",
+    "建议价格": "%.2f",
 }
 
 
@@ -228,7 +235,13 @@ def reset_sheet_metal_review_compute_filters() -> None:
 
 def reset_sheet_metal_non_material_state() -> None:
     st.session_state["sheet_metal_non_material_short_names"] = []
-    for key in [_NON_MATERIAL_RESULT_STATE_KEY, _NON_MATERIAL_REVIEW_STATE_KEY, _NON_MATERIAL_SCOPE_STATE_KEY]:
+    for key in [_NON_MATERIAL_RESULT_STATE_KEY, _NON_MATERIAL_DETAIL_RESULT_STATE_KEY, _NON_MATERIAL_REVIEW_STATE_KEY, _NON_MATERIAL_SCOPE_STATE_KEY]:
+        st.session_state.pop(key, None)
+
+
+def reset_sheet_metal_price_suggestion_state() -> None:
+    st.session_state["sheet_metal_price_suggestion_short_names"] = []
+    for key in [_PRICE_SUGGESTION_RESULT_STATE_KEY, _PRICE_SUGGESTION_SCOPE_STATE_KEY, _PRICE_SUGGESTION_COEFFICIENT_STATE_KEY]:
         st.session_state.pop(key, None)
 
 
@@ -1024,10 +1037,12 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
                         skills_overrides_json,
                     )
                     samples_df = sheet_metal_logic.build_reasonable_sheet_metal_samples(review_df)
-                    result_df = sheet_metal_logic.calculate_non_material_coefficients(samples_df, active_anchor)
+                    detail_result_df = sheet_metal_logic.calculate_non_material_coefficients(samples_df, active_anchor)
+                    result_df = sheet_metal_logic.summarize_non_material_coefficients(detail_result_df)
 
                 scope_label = str(run_request.get("scope_label") or "测算结果")
                 st.session_state[_NON_MATERIAL_RESULT_STATE_KEY] = result_df
+                st.session_state[_NON_MATERIAL_DETAIL_RESULT_STATE_KEY] = detail_result_df
                 st.session_state[_NON_MATERIAL_REVIEW_STATE_KEY] = review_df
                 st.session_state[_NON_MATERIAL_SCOPE_STATE_KEY] = scope_label
                 if run_request.get("should_export_result"):
@@ -1062,44 +1077,19 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
     preview_df, visible_columns = prepare_table_view(
         result_df,
         "sheet_metal_non_material_coefficients",
-        display_columns=sheet_metal_logic.SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS,
-        default_search_columns=["物料编码", "物料名称", "备件简称"],
+        display_columns=sheet_metal_logic.SHEET_METAL_NON_MATERIAL_SUMMARY_COLUMNS,
+        default_search_columns=["备件简称"],
         filter_title="钣金件非材料成本系数",
     )
     render_standard_data_editor(
         preview_df[visible_columns],
         "sheet_metal_non_material_coefficients",
         column_config={
-            "样本数": st.column_config.NumberColumn("样本数", disabled=True),
-            "材料时令价格": st.column_config.NumberColumn(
-                "材料时令价格",
+            "样本数量": st.column_config.NumberColumn("样本数量", disabled=True),
+            "简称级非材料系数": st.column_config.NumberColumn(
+                "简称级非材料系数",
                 disabled=True,
-                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料时令价格"],
-            ),
-            "成本": st.column_config.NumberColumn(
-                "成本",
-                disabled=True,
-                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["成本"],
-            ),
-            "重量": st.column_config.NumberColumn(
-                "重量",
-                disabled=True,
-                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["重量"],
-            ),
-            "白痴指数": st.column_config.NumberColumn(
-                "白痴指数",
-                disabled=True,
-                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["白痴指数"],
-            ),
-            "材料成本": st.column_config.NumberColumn(
-                "材料成本",
-                disabled=True,
-                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料成本"],
-            ),
-            "非材料成本系数": st.column_config.NumberColumn(
-                "非材料成本系数",
-                disabled=True,
-                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["非材料成本系数"],
+                format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["简称级非材料系数"],
             ),
         },
         max_height=520,
@@ -1114,6 +1104,252 @@ def render_sheet_metal_non_material_coefficients_page() -> None:
         file_name=export_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="sheet_metal_non_material_export",
+        fingerprint=dataframe_export_fingerprint(result_df),
+        width="stretch",
+    )
+
+
+def render_sheet_metal_price_suggestion_page() -> None:
+    inject_css(is_overview=False)
+    _inject_sheet_metal_table_css()
+    st.title("💰 钣金件价格建议")
+    st.caption("基于钣金件非材料成本系数结论，按物料颗粒度回算建议价格。")
+
+    base_df, error_message = _get_sheet_metal_source()
+    if error_message:
+        st.warning(error_message)
+        return
+    if base_df is None or base_df.empty:
+        st.info("当前钣金件基础数据为空。")
+        return
+
+    st.markdown("### 材料锚点")
+    anchor_date = st.date_input("锚点日期", value=datetime.now().date(), key="sheet_metal_price_suggestion_anchor_date")
+    fetch_col, manual_col, clear_col = st.columns([1.4, 1.4, 1], vertical_alignment="bottom")
+    with fetch_col:
+        fetch_clicked = st.button("抓取生意社钢价", key="sheet_metal_price_suggestion_fetch_public_steel_anchor", width="stretch")
+    with manual_col:
+        manual_clicked = st.button("使用手动钢价", key="sheet_metal_price_suggestion_use_manual_steel_anchor", width="stretch")
+    with clear_col:
+        clear_clicked = st.button("清空结果", key="sheet_metal_price_suggestion_clear", width="stretch")
+
+    if clear_clicked:
+        st.session_state.pop(_NON_MATERIAL_ANCHOR_STATE_KEY, None)
+        st.session_state[_NON_MATERIAL_MANUAL_PANEL_STATE_KEY] = False
+        reset_sheet_metal_price_suggestion_state()
+        st.rerun()
+
+    if fetch_clicked:
+        st.session_state[_NON_MATERIAL_MANUAL_PANEL_STATE_KEY] = False
+        with st.spinner("正在抓取生意社公开钢价..."):
+            anchor = sheet_metal_logic.load_sheet_metal_steel_market_anchor(as_of_date=anchor_date)
+        st.session_state[_NON_MATERIAL_ANCHOR_STATE_KEY] = anchor
+        if anchor.get("average_price_per_ton"):
+            st.success("已更新生意社钢价锚点。")
+        else:
+            st.warning("生意社钢价抓取未得到有效均价，请使用手动钢价。")
+
+    if manual_clicked:
+        st.session_state[_NON_MATERIAL_MANUAL_PANEL_STATE_KEY] = True
+
+    save_manual_clicked = False
+    manual_input_values: dict[str, object] = {}
+    if st.session_state.get(_NON_MATERIAL_MANUAL_PANEL_STATE_KEY, False):
+        with st.form("sheet_metal_price_suggestion_manual_steel_anchor_form", clear_on_submit=False):
+            anchor_cols = st.columns(4)
+            for index, category_name in enumerate(sheet_metal_logic._STEEL_MARKET_CATEGORIES):
+                with anchor_cols[index % len(anchor_cols)]:
+                    manual_input_values[category_name] = st.text_input(
+                        f"{category_name}（元/吨）",
+                        key=f"sheet_metal_price_suggestion_manual_steel_{category_name}",
+                        placeholder="可录入多个报价，用逗号分隔",
+                    )
+            save_manual_clicked = st.form_submit_button("保存手动钢价", type="primary")
+
+    manual_prices = (
+        _build_manual_steel_prices_from_values(manual_input_values)
+        if manual_input_values
+        else _build_manual_steel_prices_from_values(
+            {
+                category_name: st.session_state.get(f"sheet_metal_price_suggestion_manual_steel_{category_name}", "")
+                for category_name in sheet_metal_logic._STEEL_MARKET_CATEGORIES
+            }
+        )
+    )
+    manual_request = build_sheet_metal_manual_steel_anchor_request(
+        manual_panel_visible=bool(st.session_state.get(_NON_MATERIAL_MANUAL_PANEL_STATE_KEY, False)),
+        open_manual_clicked=manual_clicked,
+        save_manual_clicked=save_manual_clicked,
+        manual_prices=manual_prices,
+    )
+    st.session_state[_NON_MATERIAL_MANUAL_PANEL_STATE_KEY] = bool(manual_request["show_manual_inputs"])
+    if save_manual_clicked:
+        if manual_request["should_save_manual_anchor"]:
+            st.session_state[_NON_MATERIAL_ANCHOR_STATE_KEY] = sheet_metal_logic.load_sheet_metal_steel_market_anchor(
+                manual_prices=manual_request["manual_prices"],
+                as_of_date=anchor_date,
+            )
+            st.success("已保存手动钢价锚点。")
+        else:
+            st.warning(str(manual_request.get("message") or "请至少录入一个有效钢材大类价格。"))
+
+    active_anchor = st.session_state.get(_NON_MATERIAL_ANCHOR_STATE_KEY)
+    _render_non_material_anchor_summary(active_anchor)
+
+    st.markdown("---")
+    st.markdown("### 测算范围")
+    skills_data, skills_snapshot_exists, skills_overrides_json = _load_sheet_metal_skills_snapshot()
+    skills_loaded = bool(skills_data and skills_data.get("skills"))
+    current_sigma = float((skills_data or {}).get("global_sigma") or 1.0)
+    current_weight = int((skills_data or {}).get("global_weight") or _EXPERT_WEIGHT)
+    label_details = harness.execute_action("get_sheet_metal_feedback_details")
+    label_statuses = {record_key: payload.get("label", "") for record_key, payload in label_details.items()}
+
+    st.radio(
+        "测算模式",
+        options=["原始测算", "优化后测算（专家纠偏）"],
+        key="sheet_metal_price_suggestion_mode",
+        horizontal=True,
+    )
+    if skills_loaded:
+        st.info("已加载数据库中的最新钣金指数技能书，当前测算会应用已保存的个性化边界。")
+    elif skills_data is None and skills_snapshot_exists:
+        st.warning("钣金指数技能书快照读取异常，当前已回退到默认算法。")
+
+    short_name_options = sorted(base_df["备件简称"].dropna().astype(str).unique().tolist()) if "备件简称" in base_df.columns else []
+    filter_col, reset_col = st.columns([5, 1], vertical_alignment="bottom")
+    with filter_col:
+        selected_short_names = st.multiselect(
+            "备件简称筛选（用于计算所选简称）",
+            options=short_name_options,
+            key="sheet_metal_price_suggestion_short_names",
+        )
+    with reset_col:
+        st.button(
+            "重置",
+            key="sheet_metal_price_suggestion_reset",
+            width="stretch",
+            on_click=reset_sheet_metal_price_suggestion_state,
+        )
+
+    selected_calc_col, full_calc_col = st.columns([1.3, 1.3], vertical_alignment="bottom")
+    with selected_calc_col:
+        calculate_selected_clicked = st.button(
+            "计算所选简称",
+            type="secondary",
+            key="sheet_metal_price_suggestion_calculate_selected",
+            width="stretch",
+            disabled=not selected_short_names,
+        )
+    with full_calc_col:
+        calculate_all_clicked = st.button(
+            "一键计算全量简称",
+            type="primary",
+            key="sheet_metal_price_suggestion_calculate_all",
+            width="stretch",
+        )
+
+    run_request = build_sheet_metal_non_material_run_request(
+        selected_short_names=selected_short_names,
+        calculate_selected_clicked=calculate_selected_clicked,
+        calculate_all_clicked=calculate_all_clicked,
+    )
+    if run_request.get("message"):
+        st.warning(str(run_request["message"]))
+
+    if run_request["should_run"]:
+        if not active_anchor or not active_anchor.get("average_price_per_ton"):
+            st.warning("请先抓取或录入有效钢材锚点。")
+        else:
+            compute_source_df = base_df.copy()
+            if not run_request.get("include_all_short_names"):
+                selected_set = set(map(str, run_request.get("selected_short_names") or []))
+                compute_source_df = compute_source_df[compute_source_df["备件简称"].astype(str).isin(selected_set)].copy()
+
+            if compute_source_df.empty:
+                st.warning("当前测算范围为空，请调整备件简称。")
+            else:
+                is_expert_mode = st.session_state.sheet_metal_price_suggestion_mode == "优化后测算（专家纠偏）"
+                active_labels_tuple = tuple(sorted(label_statuses.items())) if is_expert_mode and bool(label_statuses) else tuple()
+                with st.spinner("正在计算钣金件价格建议..."):
+                    review_df = _cached_detect_sheet_metal_anomalies(
+                        compute_source_df,
+                        active_labels_tuple,
+                        is_expert_mode and bool(label_statuses),
+                        get_sheet_metal_refresh_token(),
+                        current_sigma,
+                        current_weight,
+                        skills_overrides_json,
+                    )
+                    samples_df = sheet_metal_logic.build_reasonable_sheet_metal_samples(review_df)
+                    detail_result_df = sheet_metal_logic.calculate_non_material_coefficients(samples_df, active_anchor)
+                    coefficient_summary_df = sheet_metal_logic.summarize_non_material_coefficients(detail_result_df)
+                    result_df = sheet_metal_logic.calculate_sheet_metal_price_suggestions(
+                        compute_source_df,
+                        coefficient_summary_df,
+                        active_anchor,
+                    )
+
+                scope_label = str(run_request.get("scope_label") or "测算结果")
+                st.session_state[_PRICE_SUGGESTION_RESULT_STATE_KEY] = result_df
+                st.session_state[_PRICE_SUGGESTION_SCOPE_STATE_KEY] = scope_label
+                st.session_state[_PRICE_SUGGESTION_COEFFICIENT_STATE_KEY] = coefficient_summary_df
+                if run_request.get("should_export_result"):
+                    st.success("全量钣金件价格建议已计算完成，可在下方准备并下载 Excel。")
+
+    result_df = st.session_state.get(_PRICE_SUGGESTION_RESULT_STATE_KEY)
+    scope_label = st.session_state.get(_PRICE_SUGGESTION_SCOPE_STATE_KEY) or "未测算"
+    coefficient_summary_df = st.session_state.get(_PRICE_SUGGESTION_COEFFICIENT_STATE_KEY)
+
+    if result_df is None:
+        st.info("初始状态不会进行钣金件价格建议测算。")
+        return
+
+    summary = result_df.attrs.get("excluded_summary", {}) if isinstance(result_df, pd.DataFrame) else {}
+    excluded_total = int(sum(int(value or 0) for value in summary.values()))
+    coefficient_count = len(coefficient_summary_df) if isinstance(coefficient_summary_df, pd.DataFrame) else 0
+
+    st.markdown("### 测算结果")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("测算范围", str(scope_label))
+    metric_cols[1].metric("简称系数数", f"{coefficient_count}")
+    metric_cols[2].metric("建议物料数", f"{len(result_df)}")
+    metric_cols[3].metric("排除数量", f"{excluded_total}")
+
+    _render_non_material_exclusion_summary(summary)
+    if result_df.empty:
+        st.warning("当前没有可输出的钣金件价格建议。")
+        return
+
+    preview_df, visible_columns = prepare_table_view(
+        result_df,
+        "sheet_metal_price_suggestions",
+        display_columns=sheet_metal_logic.SHEET_METAL_PRICE_SUGGESTION_COLUMNS,
+        default_search_columns=["物料编码", "物料名称", "备件简称"],
+        filter_title="钣金件价格建议",
+    )
+    render_standard_data_editor(
+        preview_df[visible_columns],
+        "sheet_metal_price_suggestions",
+        column_config={
+            "材料时令价格": st.column_config.NumberColumn("材料时令价格", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料时令价格"]),
+            "重量": st.column_config.NumberColumn("重量", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["重量"]),
+            "材料成本": st.column_config.NumberColumn("材料成本", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["材料成本"]),
+            "简称级非材料系数": st.column_config.NumberColumn("简称级非材料系数", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["简称级非材料系数"]),
+            "建议价格": st.column_config.NumberColumn("建议价格", disabled=True, format=SHEET_METAL_NON_MATERIAL_RESULT_NUMBER_FORMATS["建议价格"]),
+        },
+        max_height=560,
+    )
+
+    export_scope_label = _safe_sheet_metal_export_label(scope_label, default="测算结果")
+    export_name = f"钣金件价格建议_{export_scope_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    render_deferred_download_button(
+        label="下载钣金件价格建议",
+        prepare_label="准备导出钣金件价格建议",
+        data_builder=lambda export_frame=result_df.copy(): to_excel_bytes(export_frame, sheet_name="价格建议"),
+        file_name=export_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="sheet_metal_price_suggestion_export",
         fingerprint=dataframe_export_fingerprint(result_df),
         width="stretch",
     )

@@ -39,6 +39,22 @@ SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS = [
     "材料成本",
     "非材料成本系数",
 ]
+SHEET_METAL_NON_MATERIAL_SUMMARY_COLUMNS = [
+    "备件简称",
+    "样本数量",
+    "白痴指数区间",
+    "简称级非材料系数",
+]
+SHEET_METAL_PRICE_SUGGESTION_COLUMNS = [
+    "物料编码",
+    "物料名称",
+    "备件简称",
+    "材料时令价格",
+    "重量",
+    "材料成本",
+    "简称级非材料系数",
+    "建议价格",
+]
 _NON_MATERIAL_EXCLUDE_KEYS = [
     "not_reasonable",
     "cost_missing",
@@ -460,6 +476,143 @@ def calculate_non_material_coefficients(samples_df: pd.DataFrame, steel_anchor: 
     )
     result = result[SHEET_METAL_NON_MATERIAL_OUTPUT_COLUMNS].reset_index(drop=True)
     result.attrs["excluded_summary"] = summary
+    result.attrs["steel_anchor"] = normalized_anchor
+    result.attrs["coefficient_unit"] = "percent"
+    return result
+
+
+def summarize_non_material_coefficients(result_df: pd.DataFrame | None) -> pd.DataFrame:
+    summary_df = pd.DataFrame(columns=SHEET_METAL_NON_MATERIAL_SUMMARY_COLUMNS)
+    if result_df is None or result_df.empty:
+        if result_df is not None:
+            summary_df.attrs.update(getattr(result_df, "attrs", {}))
+        return summary_df
+
+    data = result_df.copy()
+    if "备件简称" not in data.columns:
+        summary_df.attrs.update(getattr(result_df, "attrs", {}))
+        return summary_df
+
+    data["备件简称"] = _clean_text_series(data["备件简称"])
+    data = data[data["备件简称"].notna()].copy()
+    if data.empty:
+        summary_df.attrs.update(getattr(result_df, "attrs", {}))
+        return summary_df
+
+    rows: list[dict[str, Any]] = []
+    for short_name, group in data.groupby("备件简称", sort=False):
+        sample_count = int(group["样本数"].max()) if "样本数" in group.columns and group["样本数"].notna().any() else int(len(group))
+        idiot_indexes = pd.to_numeric(group.get("白痴指数", pd.Series(dtype="float64")), errors="coerce").dropna()
+        if idiot_indexes.empty:
+            index_range = ""
+        else:
+            index_range = f"{float(idiot_indexes.min()):.2f} ~ {float(idiot_indexes.max()):.2f}"
+        coefficient = _mode_average_numeric(group.get("非材料成本系数", pd.Series(dtype="float64")))
+        rows.append(
+            {
+                "备件简称": str(short_name),
+                "样本数量": sample_count,
+                "白痴指数区间": index_range,
+                "简称级非材料系数": round(float(coefficient), 6) if pd.notna(coefficient) else np.nan,
+            }
+        )
+
+    summary_df = pd.DataFrame(rows, columns=SHEET_METAL_NON_MATERIAL_SUMMARY_COLUMNS).reset_index(drop=True)
+    summary_df.attrs.update(getattr(result_df, "attrs", {}))
+    return summary_df
+
+
+def calculate_sheet_metal_price_suggestions(
+    source_df: pd.DataFrame | None,
+    coefficient_summary_df: pd.DataFrame | None,
+    steel_anchor: dict | None,
+) -> pd.DataFrame:
+    result = pd.DataFrame(columns=SHEET_METAL_PRICE_SUGGESTION_COLUMNS)
+    result.attrs["excluded_summary"] = {
+        "short_name_missing": 0,
+        "weight_missing": 0,
+        "weight_invalid": 0,
+        "coefficient_missing": 0,
+        "steel_anchor_missing": 0,
+        "material_cost_invalid": 0,
+    }
+    if source_df is None or source_df.empty:
+        return result
+
+    data = source_df.copy()
+    normalized_anchor = _normalize_steel_market_anchor(steel_anchor)
+    material_price_per_ton = _coerce_float(normalized_anchor.get("average_price_per_ton"))
+    if material_price_per_ton is None or material_price_per_ton <= 0:
+        result.attrs["excluded_summary"]["steel_anchor_missing"] = int(len(data))
+        return result
+
+    coefficient_data = coefficient_summary_df.copy() if coefficient_summary_df is not None else pd.DataFrame()
+    if "简称级非材料系数" not in coefficient_data.columns and "非材料成本系数" in coefficient_data.columns:
+        coefficient_data["简称级非材料系数"] = coefficient_data["非材料成本系数"]
+    if "备件简称" not in coefficient_data.columns or "简称级非材料系数" not in coefficient_data.columns:
+        result.attrs["excluded_summary"]["coefficient_missing"] = int(len(data))
+        return result
+
+    coefficient_data["备件简称"] = _clean_text_series(coefficient_data["备件简称"])
+    coefficient_data["简称级非材料系数"] = pd.to_numeric(coefficient_data["简称级非材料系数"], errors="coerce")
+    coefficient_lookup = (
+        coefficient_data.dropna(subset=["备件简称", "简称级非材料系数"])
+        .drop_duplicates(subset=["备件简称"], keep="last")
+        .set_index("备件简称")["简称级非材料系数"]
+    )
+    if coefficient_lookup.empty:
+        result.attrs["excluded_summary"]["coefficient_missing"] = int(len(data))
+        return result
+
+    if "物料名称" not in data.columns and "物料描述" in data.columns:
+        data["物料名称"] = data["物料描述"]
+    for column_name in ["物料编码", "物料名称", "备件简称"]:
+        if column_name not in data.columns:
+            data[column_name] = ""
+
+    short_names = _clean_text_series(data["备件简称"])
+    weights = _first_numeric_series(data, "净重", "包装后重量")
+    coefficients = short_names.map(coefficient_lookup)
+    material_price_per_kg = float(material_price_per_ton) / 1000.0
+    material_cost = (weights / 1000.0) * material_price_per_kg
+
+    short_name_missing = short_names.isna()
+    weight_missing = weights.isna()
+    weight_invalid = weights.notna() & weights.le(0)
+    coefficient_missing = coefficients.isna()
+    material_cost_invalid = material_cost.isna() | material_cost.le(0)
+
+    excluded_summary = result.attrs["excluded_summary"]
+    excluded_summary["short_name_missing"] = int(short_name_missing.sum())
+    excluded_summary["weight_missing"] = int(weight_missing.sum())
+    excluded_summary["weight_invalid"] = int(weight_invalid.sum())
+    excluded_summary["coefficient_missing"] = int((coefficient_missing & ~short_name_missing).sum())
+    excluded_summary["material_cost_invalid"] = int((material_cost_invalid & ~weight_missing & ~weight_invalid).sum())
+
+    valid_mask = ~(short_name_missing | weight_missing | weight_invalid | coefficient_missing | material_cost_invalid)
+    valid_data = data[valid_mask].copy()
+    if valid_data.empty:
+        return result
+
+    valid_weights = weights.loc[valid_data.index].astype(float)
+    valid_material_cost = material_cost.loc[valid_data.index].astype(float)
+    valid_coefficients = coefficients.loc[valid_data.index].astype(float)
+    suggested_prices = valid_material_cost * (1.0 + valid_coefficients / 100.0)
+
+    result = pd.DataFrame(
+        {
+            "物料编码": valid_data["物料编码"].astype(str),
+            "物料名称": _first_nonempty_text_series(valid_data, "物料名称", "物料描述", default=""),
+            "备件简称": short_names.loc[valid_data.index].astype(str),
+            "材料时令价格": round(float(material_price_per_ton), 4),
+            "重量": valid_weights.round(4),
+            "材料成本": valid_material_cost.round(4),
+            "简称级非材料系数": valid_coefficients.round(6),
+            "建议价格": suggested_prices.round(4),
+        }
+    )
+    result = result[SHEET_METAL_PRICE_SUGGESTION_COLUMNS].reset_index(drop=True)
+    result.attrs["excluded_summary"] = excluded_summary
     result.attrs["steel_anchor"] = normalized_anchor
     result.attrs["coefficient_unit"] = "percent"
     return result
